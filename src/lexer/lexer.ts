@@ -143,6 +143,12 @@ export class Lexer {
       return;
     }
 
+    // Path tokens: /api/customers, /webhook/stripe
+    if (ch === "/" && isIdentCharOrDigit(this.source.peekAt(1))) {
+      this.scanPath();
+      return;
+    }
+
     // Identifiers
     if (isIdentStart(ch)) {
       this.scanIdentifier();
@@ -457,6 +463,31 @@ export class Lexer {
         while (!this.source.eof && isIdentChar(this.source.peek())) {
           value += this.source.advance();
         }
+      } else {
+        break;
+      }
+    }
+
+    this.emit(TokenType.IDENTIFIER, value, line, col);
+  }
+
+  private scanPath(): void {
+    const line = this.source.line;
+    const col = this.source.col;
+    let value = "";
+
+    // Consume path: /segment/segment/:param/{param}
+    while (!this.source.eof) {
+      const ch = this.source.peek();
+      if (
+        isIdentChar(ch) ||
+        ch === "/" ||
+        ch === "-" ||
+        ch === ":" ||
+        ch === "{" ||
+        ch === "}"
+      ) {
+        value += this.source.advance();
       } else {
         break;
       }

@@ -86,13 +86,33 @@ The Pact spec v0.1 is complete (dialect, interrogation, connectors, runtime). Th
 
 ## Getting Started
 
+### Full setup (parser + LLM)
+
+```bash
+git clone https://github.com/pact-protocol/pact.git
+cd pact
+./setup.sh                     # Install everything with Qwen 3.5 0.8B (~560 MB)
+```
+
+Choose a larger model for better code generation:
+
+```bash
+./setup.sh --model tiny        # 0.8B — ~560 MB download, ~2-3 GB RAM
+./setup.sh --model small       # 2B   — ~1.5 GB download, ~4-5 GB RAM
+./setup.sh --model medium      # 4B   — ~2.7 GB download, ~6-7 GB RAM (recommended)
+./setup.sh --model large       # 9B   — ~5.5 GB download, ~8-10 GB RAM
+./setup.sh --skip-llm          # Parser only, no LLM
+```
+
+### Parser only
+
 ```bash
 bun install
-bun test                                    # 105 tests
+bun test                                         # 105 tests
 bun run src/index.ts tests/fixtures/simple.pact  # parse a .pact file
 ```
 
-**As a library:**
+### As a library
 
 ```ts
 import { parse } from "./src/index";
@@ -113,6 +133,11 @@ const ast = parse(`pact v1
 console.log(ast.sections.map(s => s.kind));
 // ["ContractSection", "IntentSection"]
 ```
+
+### Requirements
+
+- **Parser only:** Bun 1.0+ (installed automatically by setup.sh)
+- **With LLM:** git, make, C compiler (gcc/cc), 2+ GB RAM (tiny) or 6+ GB (medium)
 
 Pact is in active development. Follow this repository for updates.
 

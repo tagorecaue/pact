@@ -45,40 +45,10 @@ export type {
 
 export { PactError, PactLexError, PactParseError } from "./errors";
 
-// CLI: bun run src/index.ts <file.pact>
-if (import.meta.main) {
-  const file = process.argv[2];
-  if (!file) {
-    console.error("Usage: bun run src/index.ts <file.pact>");
-    process.exit(1);
-  }
-  const source = await Bun.file(file).text();
-  try {
-    const ast = parse(source);
-    const sections = ast.sections.map((s) => s.kind.replace("Section", ""));
-    console.log(`✓ ${file}`);
-    console.log(`  version: ${ast.header.version}`);
-    console.log(`  sections (${sections.length}): ${sections.join(", ")}`);
-
-    const contract = ast.sections.find((s) => s.kind === "ContractSection");
-    if (contract && contract.kind === "ContractSection") {
-      console.log(`  contract: ${contract.name} ${contract.version}`);
-      if (contract.domain) console.log(`  domain: ${contract.domain}`);
-    }
-
-    const entities = ast.sections.find((s) => s.kind === "EntitiesSection");
-    if (entities && entities.kind === "EntitiesSection") {
-      for (const e of entities.entities) {
-        console.log(`  entity ${e.name}: ${e.fields.length} fields`);
-      }
-    }
-
-    const execution = ast.sections.find((s) => s.kind === "ExecutionSection");
-    if (execution && execution.kind === "ExecutionSection") {
-      console.log(`  flow: ${execution.flow.length} top-level nodes`);
-    }
-  } catch (e: any) {
-    console.error(`✗ ${file}\n${e.message}`);
-    process.exit(1);
-  }
-}
+// Runtime re-exports
+export { ContractRegistry, type LoadedContract } from "./runtime/registry";
+export { EvidenceStore, type EvidenceEntry } from "./runtime/evidence";
+export { ExecutionEngine, ExecutionContext, PactRuntimeError, type ExecutionResult, type StepResult } from "./runtime/engine";
+export { DataStore } from "./runtime/store";
+export { HttpClient, HttpTimeoutError, type HttpRequestSpec, type HttpResponse } from "./runtime/http-client";
+export { PactServer, type PactServerOptions } from "./runtime/server";
