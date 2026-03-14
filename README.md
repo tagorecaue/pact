@@ -70,11 +70,51 @@ Pact **understands** what you want, asks what you forgot, and guarantees the res
 
 Workflow tools automate. Pact makes contracts.
 
+## Current Status
+
+The Pact spec v0.1 is complete (dialect, interrogation, connectors, runtime). The parser is implemented and can parse all 15 section types defined in the spec.
+
+**What works today:**
+
+- Hand-written recursive descent parser (TypeScript + Bun, zero external dependencies)
+- Lexer with Python-style INDENT/DEDENT tokens
+- Full AST covering all section types: `@C` `@I` `@E` `@K` `@X` `@V` `@T` `@F` `@D` `@S` `@P` `@M` `@R` `@L` `@N`
+- Type system: `str`, `int`, `dec`, `bool`, `ts`, `dur`, `id`, `any`, `ref[T]`, `list[T]`, `map[K,V]`, `opt[T]`, `enum(a,b,c)`
+- Expression parser: comparisons, logic (`&`, `|`, `!`, `?`), quantifiers (`forall`, `exists`), function calls
+- Flow parser: `>>` pipe, `>` then, `|` parallel, `?`/`?!` conditional, `??` match, `*` loop, `@>` delegate, `~>` async, `<>` exchange
+- Validation: rejects CRLF, tabs, BOM, duplicate sections, `@R`+`@X` mutual exclusion
+
 ## Getting Started
 
-Coming soon. Pact is in active development.
+```bash
+bun install
+bun test                                    # 105 tests
+bun run src/index.ts tests/fixtures/simple.pact  # parse a .pact file
+```
 
-Follow this repository to be notified when the first public release drops.
+**As a library:**
+
+```ts
+import { parse } from "./src/index";
+
+const ast = parse(`pact v1
+
+@C my.service 1.0.0
+  domain example
+  author me
+  created 2026-03-14T00:00:00Z
+
+@I
+  natural "Do something useful"
+  goal result.success
+  timeout 10s
+`);
+
+console.log(ast.sections.map(s => s.kind));
+// ["ContractSection", "IntentSection"]
+```
+
+Pact is in active development. Follow this repository for updates.
 
 ## License
 
