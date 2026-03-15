@@ -2,10 +2,12 @@ import { describe, test, expect } from "bun:test";
 import {
   buildGenerationPrompt,
   buildGapDetectionPrompt,
+  buildRefinePrompt,
   generateSuggestions,
   extractPactBlock,
   parseGapQuestions,
   extractContractName,
+  Translator,
 } from "../src/runtime/translator";
 import { parse } from "../src/index";
 
@@ -475,12 +477,46 @@ describe("generateSuggestions", () => {
   });
 });
 
+// ── buildRefinePrompt ──
+
+describe("buildRefinePrompt", () => {
+  const contract = `pact v1\n@C test 1.0.0\n  domain demo`;
+  const gaps = [
+    { question: "What if the DB fails?", answer: "retry 3 backoff exponential base 2s" },
+    { question: "How is auth handled?", answer: "bearer_token" },
+  ];
+  const prompt = buildRefinePrompt(contract, gaps);
+
+  test("includes the contract source", () => {
+    expect(prompt).toContain("@C test 1.0.0");
+  });
+
+  test("includes gap questions and answers", () => {
+    expect(prompt).toContain("Q: What if the DB fails?");
+    expect(prompt).toContain("A: retry 3 backoff exponential base 2s");
+    expect(prompt).toContain("Q: How is auth handled?");
+    expect(prompt).toContain("A: bearer_token");
+  });
+
+  test("numbers the gap resolutions", () => {
+    expect(prompt).toContain("1. Q:");
+    expect(prompt).toContain("2. Q:");
+  });
+
+  test("wraps contract in pact code block", () => {
+    expect(prompt).toContain("```pact");
+  });
+
+  test("instructs to output updated pact file", () => {
+    expect(prompt).toContain("Update the contract to incorporate each resolution");
+    expect(prompt).toContain("```pact code block");
+  });
+});
+
 // ── Translator class (without actual LLM calls) ──
 
 describe("Translator", () => {
   test("is importable and constructible", () => {
-    const { Translator } = require("../src/runtime/translator");
-    // Create with a mock LLM
     const translator = new Translator({
       llm: {
         name: "mock",
@@ -490,5 +526,112 @@ describe("Translator", () => {
       outputDir: "/tmp/pact-test-contracts",
     });
     expect(translator).toBeDefined();
+  });
+
+  test("refineWithGaps sends correct prompt and parses response", async () => {
+    const refinedContract = `pact v1
+
+@C test.refined 1.0.0
+  domain demo
+  author translator:pact-cli
+  created 2026-03-15T00:00:00Z
+
+@I
+  natural "A test contract"
+  goal test.done
+  timeout 5s
+
+@E
+  item
+    id id ~
+    name str !
+    created_at ts ~
+
+@X
+  validate name
+  persist item
+
+@F
+  on db_unavailable
+    retry 3 backoff exponential base 2s
+    abort "Database unavailable after retries"`;
+
+    let capturedPrompt = "";
+    const translator = new Translator({
+      llm: {
+        name: "mock",
+        isAvailable: () => true,
+        complete: async (prompt: string) => {
+          capturedPrompt = prompt;
+          return {
+            text: "```pact\n" + refinedContract + "\n```",
+            durationMs: 100,
+            provider: "mock",
+          };
+        },
+      },
+      outputDir: "/tmp/pact-test-refine",
+    });
+
+    const originalSource = `pact v1\n@C test 1.0.0\n  domain demo`;
+    const gaps = [
+      { question: "What if the DB fails?", answer: "retry 3 backoff exponential base 2s" },
+    ];
+
+    const result = await translator.refineWithGaps(originalSource, gaps);
+
+    // Verify the prompt was constructed correctly
+    expect(capturedPrompt).toContain("@C test 1.0.0");
+    expect(capturedPrompt).toContain("Q: What if the DB fails?");
+    expect(capturedPrompt).toContain("A: retry 3 backoff exponential base 2s");
+
+    // Verify the result
+    expect(result.success).toBe(true);
+    expect(result.contractSource).toContain("@F");
+    expect(result.contractSource).toContain("retry 3");
+    expect(result.contractName).toBe("test.refined");
+  });
+
+  test("refineWithGaps returns error when LLM fails", async () => {
+    const translator = new Translator({
+      llm: {
+        name: "mock",
+        isAvailable: () => true,
+        complete: async () => {
+          throw new Error("LLM connection refused");
+        },
+      },
+      outputDir: "/tmp/pact-test-refine-fail",
+    });
+
+    const result = await translator.refineWithGaps("pact v1", [
+      { question: "test?", answer: "yes" },
+    ]);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("LLM refinement failed");
+    expect(result.contractSource).toBe("pact v1");
+  });
+
+  test("refineWithGaps returns error when LLM returns no pact block", async () => {
+    const translator = new Translator({
+      llm: {
+        name: "mock",
+        isAvailable: () => true,
+        complete: async () => ({
+          text: "I could not generate a contract.",
+          durationMs: 50,
+          provider: "mock",
+        }),
+      },
+      outputDir: "/tmp/pact-test-refine-noblock",
+    });
+
+    const result = await translator.refineWithGaps("pact v1", [
+      { question: "test?", answer: "yes" },
+    ]);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("did not produce a valid .pact code block");
   });
 });

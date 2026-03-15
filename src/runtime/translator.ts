@@ -515,6 +515,26 @@ export function extractContractName(source: string): string | null {
   return match ? match[1]! : null;
 }
 
+// ── Refine prompt for gap resolution ──
+
+export function buildRefinePrompt(
+  contractSource: string,
+  gapAnswers: { question: string; answer: string }[],
+): string {
+  const gapList = gapAnswers
+    .map((g, i) => `${i + 1}. Q: ${g.question}\n   A: ${g.answer}`)
+    .join("\n");
+
+  return `Here is a Pact contract and a list of gap resolutions. Update the contract to incorporate each resolution. Output the updated .pact file in a \`\`\`pact code block.
+
+\`\`\`pact
+${contractSource}
+\`\`\`
+
+Gap resolutions:
+${gapList}`;
+}
+
 // ── Translator ──
 
 export class Translator {
@@ -598,5 +618,69 @@ export class Translator {
         ? `Generated contract has parse errors: ${parseError}`
         : undefined,
     };
+  }
+
+  async refineWithGaps(
+    contractSource: string,
+    gapAnswers: { question: string; answer: string }[],
+  ): Promise<TranslatorResult> {
+    const prompt = buildRefinePrompt(contractSource, gapAnswers);
+    let response;
+    try {
+      response = await this.llm.complete(prompt, 4096);
+    } catch (err: any) {
+      return {
+        success: false,
+        error: `LLM refinement failed: ${err.message}`,
+        contractSource,
+      };
+    }
+
+    const refined = extractPactBlock(response.text);
+    if (!refined) {
+      return {
+        success: false,
+        error: "LLM did not produce a valid .pact code block during refinement.",
+        contractSource,
+      };
+    }
+
+    const contractName = extractContractName(refined);
+
+    // Validate by parsing
+    let ast: PactFile | null = null;
+    let parseError: string | null = null;
+    try {
+      ast = parse(refined);
+    } catch (err: any) {
+      parseError = err.message;
+    }
+
+    // Deterministic suggestions on refined contract
+    const suggestions = generateSuggestions(refined, ast);
+
+    return {
+      success: !parseError,
+      contractSource: refined,
+      contractName: contractName ?? undefined,
+      suggestions,
+      error: parseError
+        ? `Refined contract has parse errors: ${parseError}`
+        : undefined,
+    };
+  }
+
+  /** Save contract source to the output directory. Returns the file path or null. */
+  saveContract(contractSource: string, contractName: string): string | null {
+    try {
+      if (!existsSync(this.outputDir)) {
+        mkdirSync(this.outputDir, { recursive: true });
+      }
+      const filePath = join(this.outputDir, `${contractName}.pact`);
+      writeFileSync(filePath, contractSource + "\n", "utf-8");
+      return filePath;
+    } catch {
+      return null;
+    }
   }
 }

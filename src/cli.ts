@@ -24,12 +24,14 @@ Usage:
   pact demo-heal [--port 4000]              Run self-healing demo
 
 Options:
-  --input '<json>'    JSON input for contract execution
-  --desc "<text>"     Natural language description (non-interactive mode)
-  --output-dir <dir>  Output directory for generated contracts (default: contracts)
-  --port <number>     HTTP server port (default: 3000 / 4000 for demo)
-  --data-dir <path>   Data directory (default: data)
-  --help              Show this help
+  --input '<json>'      JSON input for contract execution
+  --desc "<text>"       Natural language description
+  --no-interactive      Skip interactive gap resolution (CI/scripts)
+  --auto-accept         Accept all gap suggestions automatically
+  --output-dir <dir>    Output directory for generated contracts (default: contracts)
+  --port <number>       HTTP server port (default: 3000 / 4000 for demo)
+  --data-dir <path>     Data directory (default: data)
+  --help                Show this help
 `.trim();
 
 async function main() {
@@ -253,24 +255,28 @@ function printFlowNode(node: any, indent: number): void {
 
 // ── pact new ──
 
-async function promptInput(question: string): Promise<string> {
-  process.stdout.write(question);
-  return new Promise((resolve) => {
-    let data = "";
-    const onData = (chunk: Buffer) => {
-      data += chunk.toString();
-      if (data.includes("\n")) {
-        process.stdin.removeListener("data", onData);
-        process.stdin.pause();
-        resolve(data.trim());
-      }
-    };
-    process.stdin.resume();
-    process.stdin.on("data", onData);
+import * as readline from "readline";
+
+function createPrompt(): { ask: (question: string) => Promise<string>; close: () => void } {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
   });
+
+  const ask = (question: string): Promise<string> =>
+    new Promise((resolve) => {
+      rl.question(question, (answer) => {
+        resolve(answer.trim());
+      });
+    });
+
+  return { ask, close: () => rl.close() };
 }
 
 async function cmdNew(args: string[]) {
+  const noInteractive = args.includes("--no-interactive");
+  const autoAccept = args.includes("--auto-accept");
+
   // Determine description from args
   let description: string | null = null;
 
@@ -292,83 +298,227 @@ async function cmdNew(args: string[]) {
   const outIdx = args.indexOf("--output-dir");
   const outputDir = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1]! : "contracts";
 
-  // Mode 3: Interactive (no description provided)
-  if (!description) {
-    console.log("\n  pact new — Generate a contract from natural language\n");
-    description = await promptInput("  What should this contract do?\n  > ");
+  // Create readline interface (used for interactive prompts)
+  const prompt = !noInteractive ? createPrompt() : null;
+
+  try {
+    // Phase 1 — Get description
     if (!description) {
-      console.error("\n  No description provided.");
+      if (noInteractive) {
+        console.error("  --no-interactive requires --desc or a positional description.");
+        process.exit(1);
+      }
+      console.log("\n  pact new — Generate a contract from natural language\n");
+      description = await prompt!.ask("  What should this contract do?\n  > ");
+      if (!description) {
+        console.error("\n  No description provided.");
+        process.exit(1);
+      }
+      console.log("");
+    }
+
+    // Check for LLM
+    const llm = createDefaultProvider();
+    if (!llm || !llm.isAvailable()) {
+      console.error("  No LLM configured.");
+      console.error("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
       process.exit(1);
     }
-    console.log("");
-  }
 
-  // Check for LLM
-  const llm = createDefaultProvider();
-  if (!llm || !llm.isAvailable()) {
-    console.error("  No LLM configured.");
-    console.error("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
-    process.exit(1);
-  }
+    // Phase 2 — Generate initial contract
+    console.log(`  Generating contract...\n`);
 
-  console.log(`  Generating contract...\n`);
+    const translator = new Translator({ llm, outputDir });
+    const result = await translator.generate(description);
 
-  const translator = new Translator({ llm, outputDir });
-  const result = await translator.generate(description);
+    if (!result.contractSource) {
+      console.error(`  Generation failed: ${result.error ?? "unknown error"}`);
+      process.exit(1);
+    }
 
-  if (!result.contractSource) {
-    console.error(`  Generation failed: ${result.error ?? "unknown error"}`);
-    process.exit(1);
-  }
+    let contractSource = result.contractSource;
+    let contractName = result.contractName ?? "unnamed";
 
-  // Display the generated contract
-  const name = result.contractName ?? "unnamed";
-  console.log(`  ${"─".repeat(50)}`);
-  console.log(`  ${name}`);
-  console.log(`  ${"─".repeat(50)}\n`);
+    // Show contract summary
+    const ast = (() => { try { return parse(contractSource); } catch { return null; } })();
+    const sectionCount = ast ? ast.sections.length : 0;
+    const entityNames = ast
+      ? ast.sections
+          .filter((s): s is any => s.kind === "EntitiesSection")
+          .flatMap((s: any) => s.entities.map((e: any) => e.name))
+      : [];
 
-  // Show contract source with indentation
-  for (const line of result.contractSource.split("\n")) {
-    console.log(`  ${line}`);
-  }
-  console.log("");
+    console.log(`  ${"─".repeat(50)}`);
+    console.log(`  ${contractName}  v${ast?.header.version ?? "?"}`);
+    console.log(`  ${sectionCount} sections${entityNames.length > 0 ? ", entities: " + entityNames.join(", ") : ""}`);
+    console.log(`  ${"─".repeat(50)}\n`);
 
-  // Show parse status
-  if (result.success) {
-    console.log(`  [parse] Valid contract`);
-  } else {
-    console.log(`  [parse] Warning: ${result.error}`);
-    console.log(`  The contract was saved but may need manual fixes.`);
-  }
-  console.log("");
-
-  // Show suggestions
-  if (result.suggestions && result.suggestions.length > 0) {
-    console.log("  Recommendations:");
-    for (let i = 0; i < result.suggestions.length; i++) {
-      console.log(`    ${i + 1}. ${result.suggestions[i]}`);
+    // Show contract source with indentation
+    for (const line of contractSource.split("\n")) {
+      console.log(`  ${line}`);
     }
     console.log("");
-  }
 
-  // Show gaps
-  if (result.gaps && result.gaps.length > 0) {
-    console.log("  Gaps detected:");
-    for (const gap of result.gaps) {
-      console.log(`    [${gap.category}] ${gap.question}`);
-      if (gap.suggestion) {
-        console.log(`      -> Suggested: ${gap.suggestion}`);
+    // Show parse status
+    if (result.success) {
+      console.log(`  [parse] Valid contract`);
+    } else {
+      console.log(`  [parse] Warning: ${result.error}`);
+      console.log(`  The contract may need manual fixes.`);
+    }
+    console.log("");
+
+    // Phase 3 — Interactive gap resolution
+    const gaps = result.gaps ?? [];
+    const gapAnswers: { question: string; answer: string }[] = [];
+
+    if (gaps.length > 0 && !noInteractive) {
+      console.log(`  ${gaps.length} gap(s) detected:\n`);
+
+      for (let i = 0; i < gaps.length; i++) {
+        const gap = gaps[i]!;
+        console.log(`  Gap ${i + 1}/${gaps.length} [${gap.category}]`);
+        console.log(`  ${gap.question}`);
+        if (gap.suggestion) {
+          console.log(`  -> Suggested: ${gap.suggestion}`);
+        }
+
+        let choice: string;
+        if (autoAccept) {
+          choice = "y";
+          console.log(`  [Y]es / [n]o / [c]ustom: y (auto-accept)`);
+        } else {
+          choice = await prompt!.ask("  [Y]es / [n]o / [c]ustom: ");
+        }
+
+        const key = choice.toLowerCase() || "y"; // Enter = yes
+
+        if (key === "y" || key === "yes") {
+          if (gap.suggestion) {
+            gapAnswers.push({ question: gap.question, answer: gap.suggestion });
+            console.log(`  -> Accepted\n`);
+          } else {
+            // No suggestion to accept, ask for custom answer
+            let custom: string;
+            if (autoAccept) {
+              console.log(`  (no suggestion to accept, skipping)\n`);
+            } else {
+              custom = await prompt!.ask("  Your answer: ");
+              if (custom) {
+                gapAnswers.push({ question: gap.question, answer: custom });
+                console.log(`  -> Recorded\n`);
+              } else {
+                console.log(`  -> Skipped\n`);
+              }
+            }
+          }
+        } else if (key === "c" || key === "custom") {
+          const custom = autoAccept ? "" : await prompt!.ask("  Your answer: ");
+          if (custom) {
+            gapAnswers.push({ question: gap.question, answer: custom });
+            console.log(`  -> Recorded\n`);
+          } else {
+            console.log(`  -> Skipped\n`);
+          }
+        } else {
+          // n or anything else = skip
+          console.log(`  -> Skipped\n`);
+        }
+      }
+    } else if (gaps.length > 0 && noInteractive) {
+      // Non-interactive: just dump gaps
+      console.log("  Gaps detected:");
+      for (const gap of gaps) {
+        console.log(`    [${gap.category}] ${gap.question}`);
+        if (gap.suggestion) {
+          console.log(`      -> Suggested: ${gap.suggestion}`);
+        }
+      }
+      console.log("");
+
+      // Auto-accept mode in non-interactive: accept all suggestions
+      if (autoAccept) {
+        for (const gap of gaps) {
+          if (gap.suggestion) {
+            gapAnswers.push({ question: gap.question, answer: gap.suggestion });
+          }
+        }
       }
     }
+
+    // Phase 4 — Apply gaps
+    if (gapAnswers.length > 0) {
+      console.log(`  Applying ${gapAnswers.length} gap(s) to contract...\n`);
+      const refined = await translator.refineWithGaps(contractSource, gapAnswers);
+
+      if (refined.contractSource) {
+        contractSource = refined.contractSource;
+        contractName = refined.contractName ?? contractName;
+
+        // Show updated contract
+        console.log(`  ${"─".repeat(50)}`);
+        console.log(`  ${contractName} (refined)`);
+        console.log(`  ${"─".repeat(50)}\n`);
+
+        for (const line of contractSource.split("\n")) {
+          console.log(`  ${line}`);
+        }
+        console.log("");
+
+        if (refined.success) {
+          console.log(`  [parse] Valid contract`);
+        } else {
+          console.log(`  [parse] Warning: ${refined.error}`);
+        }
+        console.log("");
+      } else {
+        console.log(`  Refinement failed: ${refined.error ?? "unknown error"}`);
+        console.log(`  Keeping original contract.\n`);
+      }
+    }
+
+    // Phase 5 — Show recommendations
+    const suggestions = result.suggestions ?? [];
+    if (suggestions.length > 0) {
+      console.log("  Recommendations:");
+      for (let i = 0; i < suggestions.length; i++) {
+        console.log(`    ${i + 1}. ${suggestions[i]}`);
+      }
+      console.log("");
+    }
+
+    // Phase 6 — Save
+    if (noInteractive) {
+      // Non-interactive: save automatically
+      const filePath = translator.saveContract(contractSource, contractName);
+      if (filePath) {
+        console.log(`  Saved to ${filePath}`);
+      }
+    } else {
+      const saveAnswer = await prompt!.ask(`  Save to contracts/${contractName}.pact? [Y/n]: `);
+      const doSave = !saveAnswer || saveAnswer.toLowerCase() === "y" || saveAnswer.toLowerCase() === "yes";
+
+      if (doSave) {
+        const filePath = translator.saveContract(contractSource, contractName);
+        if (filePath) {
+          console.log(`  Saved to ${filePath}`);
+        } else {
+          console.log(`  Save failed. Here is the contract source:\n`);
+          console.log(contractSource);
+        }
+      } else {
+        console.log(`\n  Contract source (copy/paste):\n`);
+        console.log(contractSource);
+      }
+    }
+
     console.log("");
+  } finally {
+    // IMPORTANT: Close readline before exit to prevent hanging
+    if (prompt) {
+      prompt.close();
+    }
   }
-
-  // Show save location
-  if (result.filePath) {
-    console.log(`  Saved to ${result.filePath}`);
-  }
-
-  console.log("");
 }
 
 // ── pact run ──
