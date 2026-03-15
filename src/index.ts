@@ -52,3 +52,4 @@ export { ExecutionEngine, ExecutionContext, PactRuntimeError, type ExecutionResu
 export { DataStore } from "./runtime/store";
 export { HttpClient, HttpTimeoutError, type HttpRequestSpec, type HttpResponse } from "./runtime/http-client";
 export { PactServer, type PactServerOptions } from "./runtime/server";
+export { type LlmProvider, type LlmResponse, type LlmConfig, LocalLlm, ApiLlm, createLlmProvider, createDefaultProvider, loadLlmConfig } from "./runtime/llm";

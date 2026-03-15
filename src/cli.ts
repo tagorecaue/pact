@@ -2,7 +2,9 @@ import { parse } from "./index";
 import { ContractRegistry } from "./runtime/registry";
 import { EvidenceStore } from "./runtime/evidence";
 import { ExecutionEngine } from "./runtime/engine";
+import { AiExecutor } from "./runtime/ai-executor";
 import { PactServer } from "./runtime/server";
+import { createDefaultProvider } from "./runtime/llm";
 import type { LoadedContract } from "./runtime/registry";
 
 const USAGE = `
@@ -263,16 +265,35 @@ async function cmdRun(args: string[]) {
   registry.loadFile(file);
   const contract = registry.getAll()[0]!;
 
-  // Setup engine
+  // Detect execution mode: @X (deterministic) vs @R (AI reasoning)
+  const hasExecution = contract.sections.execution;
+  const hasReasoning = contract.ast.sections.some((s) => s.kind === "ReasoningSection");
+
   const evidence = new EvidenceStore(dataDir);
-  const engine = new ExecutionEngine(evidence);
 
   console.log(`\n── pact run: ${contract.name} ${contract.version} ──\n`);
   console.log(`  input: ${JSON.stringify(input)}`);
+  console.log(`  mode:  ${hasReasoning ? "reasoning (@R)" : "deterministic (@X)"}`);
   console.log("");
 
-  // Execute
-  const result = await engine.execute(contract, input);
+  let result;
+  if (hasReasoning) {
+    // AI reasoning mode
+    const llm = createDefaultProvider();
+    if (!llm) {
+      console.error("  No LLM configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
+      evidence.close();
+      process.exit(1);
+    }
+    console.log(`  llm:   ${llm.name}`);
+    console.log("");
+    const aiExecutor = new AiExecutor({ llm, evidence });
+    result = await aiExecutor.execute(contract, input);
+  } else {
+    // Deterministic mode
+    const engine = new ExecutionEngine(evidence);
+    result = await engine.execute(contract, input);
+  }
 
   // Display results
   for (const step of result.steps) {
