@@ -1,6 +1,9 @@
 import type { LoadedContract } from "./registry";
 import type { EvidenceStore } from "./evidence";
 import { HttpClient, type HttpResponse } from "./http-client";
+import type { LlmProvider } from "./llm";
+import { detectDivergence, buildSchemaMap, type DivergenceReport } from "./divergence";
+import { SelfHealer, applyFieldMapping } from "./self-healer";
 import type {
   FlowExpr,
   StepNode,
@@ -42,10 +45,23 @@ export interface StepResult {
 export class ExecutionEngine {
   private evidence: EvidenceStore;
   private httpClient: HttpClient;
+  private llm: LlmProvider | null;
+  private selfHealer: SelfHealer | null;
+  // Store last known schema per exchange target for divergence detection
+  private schemaCache: Map<string, Record<string, string>> = new Map();
+  // Store last successful response per exchange target
+  private responseCache: Map<string, Record<string, unknown>> = new Map();
+  // Last divergence report (for external access by demo/CLI)
+  public lastDivergence: DivergenceReport | null = null;
+  public lastHealResult: import("./self-healer").HealResult | null = null;
 
-  constructor(evidence: EvidenceStore, httpClient?: HttpClient) {
+  constructor(evidence: EvidenceStore, httpClient?: HttpClient, llm?: LlmProvider) {
     this.evidence = evidence;
     this.httpClient = httpClient ?? new HttpClient();
+    this.llm = llm ?? null;
+    this.selfHealer = this.llm
+      ? new SelfHealer({ llm: this.llm, evidence: this.evidence })
+      : null;
   }
 
   async execute(
@@ -385,7 +401,9 @@ export class ExecutionEngine {
       targetUrl = node.target;
     } else if (node.target.includes("/")) {
       // Target has path segments (e.g., httpbin.org/get) — treat as full host+path
-      targetUrl = `https://${node.target}`;
+      // Use http:// for localhost targets, https:// for everything else
+      const protocol = node.target.startsWith("localhost") || node.target.startsWith("127.0.0.1") ? "http" : "https";
+      targetUrl = `${protocol}://${node.target}`;
     } else if (baseUrl) {
       // Dotted target without slash — convert dots to path segments
       targetUrl = `${baseUrl}/${node.target.replace(/\./g, "/")}`;
@@ -414,7 +432,66 @@ export class ExecutionEngine {
 
         // Set received fields from response body
         if (response.body && typeof response.body === "object") {
-          const body = response.body as Record<string, unknown>;
+          let body = response.body as Record<string, unknown>;
+
+          // If response is an array, use the first item for schema detection
+          if (Array.isArray(response.body) && response.body.length > 0) {
+            body = response.body[0] as Record<string, unknown>;
+          }
+
+          // ── Phase 5: Divergence detection ──
+          const previousSchema = this.schemaCache.get(node.target) ?? null;
+          const divergence = detectDivergence(
+            node.receive,
+            previousSchema,
+            body,
+            node.target,
+          );
+
+          if (divergence.divergences.length > 0) {
+            this.lastDivergence = divergence;
+
+            // Record divergence in evidence
+            this.evidence.record({
+              contract_id: contractId,
+              request_id: requestId,
+              step_name: `divergence:${node.target}`,
+              action: "divergence_detected",
+              input: JSON.stringify({ expectedFields: node.receive, previousSchema }),
+              output: JSON.stringify(divergence),
+              duration_ms: 0,
+              timestamp: new Date().toISOString(),
+              status: divergence.hasHighImpact ? "failed" : "success",
+            });
+
+            // If high impact divergence and LLM is available, attempt self-healing
+            if (divergence.hasHighImpact && this.selfHealer) {
+              const contract = ctx.get("_contract") as LoadedContract | undefined;
+              if (contract) {
+                const lastResponse = this.responseCache.get(node.target) ?? null;
+                const healResult = await this.selfHealer.heal(
+                  contract,
+                  divergence,
+                  lastResponse,
+                  body,
+                );
+                this.lastHealResult = healResult;
+
+                // Apply field mapping if healing succeeded
+                if (healResult.success && healResult.fieldMapping) {
+                  body = applyFieldMapping(body, healResult.fieldMapping, node.receive) as Record<string, unknown>;
+                }
+              }
+            }
+          } else {
+            this.lastDivergence = null;
+          }
+
+          // Store schema and response for future comparison
+          this.schemaCache.set(node.target, buildSchemaMap(body));
+          this.responseCache.set(node.target, body);
+
+          // Extract fields from (possibly adapted) body
           for (const field of node.receive) {
             const value = body[field] ?? body[toCamelCase(field)] ?? body[toSnakeCase(field)];
             if (value !== undefined) {

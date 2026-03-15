@@ -53,3 +53,6 @@ export { DataStore } from "./runtime/store";
 export { HttpClient, HttpTimeoutError, type HttpRequestSpec, type HttpResponse } from "./runtime/http-client";
 export { PactServer, type PactServerOptions } from "./runtime/server";
 export { type LlmProvider, type LlmResponse, type LlmConfig, LocalLlm, ApiLlm, createLlmProvider, createDefaultProvider, loadLlmConfig } from "./runtime/llm";
+export { detectDivergence, buildSchemaMap, type SchemaDivergence, type DivergenceReport } from "./runtime/divergence";
+export { SelfHealer, applyFieldMapping, type SelfHealerOptions, type HealResult } from "./runtime/self-healer";
+export { startMockServer, type MockServerHandle, type SchemaVersion } from "./runtime/mock-server";
