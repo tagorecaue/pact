@@ -1,5 +1,6 @@
 import type { LoadedContract } from "./registry";
 import type { EvidenceStore } from "./evidence";
+import { HttpClient, type HttpResponse } from "./http-client";
 import type {
   FlowExpr,
   StepNode,
@@ -40,9 +41,11 @@ export interface StepResult {
 
 export class ExecutionEngine {
   private evidence: EvidenceStore;
+  private httpClient: HttpClient;
 
-  constructor(evidence: EvidenceStore) {
+  constructor(evidence: EvidenceStore, httpClient?: HttpClient) {
     this.evidence = evidence;
+    this.httpClient = httpClient ?? new HttpClient();
   }
 
   async execute(
@@ -366,31 +369,99 @@ export class ExecutionEngine {
     requestId: string,
     steps: StepResult[],
   ): Promise<void> {
-    // In Phase 1, exchange is a stub — records send/receive but doesn't do HTTP
     const startTime = performance.now();
-    const result = {
-      target: node.target,
-      sent: node.send,
-      received: node.receive.map((field) => ({
-        field,
-        value: `mock_${field}`,
-      })),
-    };
+    const stepName = `exchange:${node.target}`;
 
-    // Set received values in context
-    for (const field of node.receive) {
-      ctx.set(field, `mock_${field}`);
+    // Build send payload from context
+    const payload: Record<string, unknown> = {};
+    for (const field of node.send) {
+      payload[field] = ctx.get(field) ?? field;
+    }
+
+    // Resolve target URL
+    const baseUrl = ctx.get("_base_url") as string | undefined;
+    let targetUrl: string | null = null;
+    if (node.target.startsWith("http://") || node.target.startsWith("https://")) {
+      targetUrl = node.target;
+    } else if (node.target.includes("/")) {
+      // Target has path segments (e.g., httpbin.org/get) — treat as full host+path
+      targetUrl = `https://${node.target}`;
+    } else if (baseUrl) {
+      // Dotted target without slash — convert dots to path segments
+      targetUrl = `${baseUrl}/${node.target.replace(/\./g, "/")}`;
+    }
+
+    let result: Record<string, unknown>;
+
+    if (targetUrl) {
+      // Real HTTP exchange
+      try {
+        const response = await this.httpClient.request({
+          method: "POST",
+          url: targetUrl,
+          body: payload,
+          timeout: 30_000,
+        });
+
+        result = {
+          target: node.target,
+          url: targetUrl,
+          status: response.status,
+          sent: payload,
+          response: response.body,
+          durationMs: response.durationMs,
+        };
+
+        // Set received fields from response body
+        if (response.body && typeof response.body === "object") {
+          const body = response.body as Record<string, unknown>;
+          for (const field of node.receive) {
+            const value = body[field] ?? body[toCamelCase(field)] ?? body[toSnakeCase(field)];
+            if (value !== undefined) {
+              ctx.set(field, value);
+            }
+          }
+        }
+      } catch (err) {
+        const durationMs = Math.round(performance.now() - startTime);
+        const message = err instanceof Error ? err.message : String(err);
+
+        steps.push({ name: stepName, status: "failed", durationMs, error: message });
+        this.evidence.record({
+          contract_id: contractId,
+          request_id: requestId,
+          step_name: stepName,
+          action: "exchange",
+          input: JSON.stringify({ target: node.target, url: targetUrl, send: payload }),
+          output: JSON.stringify({ error: message }),
+          duration_ms: durationMs,
+          timestamp: new Date().toISOString(),
+          status: "failed",
+        });
+        throw err;
+      }
+    } else {
+      // Mock exchange — no URL configured
+      result = {
+        target: node.target,
+        mode: "mock",
+        sent: payload,
+        received: node.receive.map((field) => ({ field, value: `mock_${field}` })),
+      };
+      for (const field of node.receive) {
+        ctx.set(field, `mock_${field}`);
+      }
     }
 
     const durationMs = Math.round(performance.now() - startTime);
-    steps.push({ name: `exchange:${node.target}`, status: "success", output: result, durationMs });
+    steps.push({ name: stepName, status: "success", output: result, durationMs });
 
     this.evidence.record({
       contract_id: contractId,
       request_id: requestId,
-      step_name: `exchange:${node.target}`,
+      step_name: stepName,
       action: "exchange",
-      input: JSON.stringify({ target: node.target, send: node.send }),
+      input: JSON.stringify({ target: node.target, send: payload }),
       output: JSON.stringify(result),
       duration_ms: durationMs,
       timestamp: new Date().toISOString(),
@@ -588,4 +659,14 @@ export class PactRuntimeError extends Error {
     super(message);
     this.name = "PactRuntimeError";
   }
+}
+
+// ── String helpers ──
+
+function toCamelCase(s: string): string {
+  return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+function toSnakeCase(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());
 }

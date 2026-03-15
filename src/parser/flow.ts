@@ -559,11 +559,20 @@ function parseExchange(p: ParserBase): FlowExpr {
   const loc = { line: p.peek().line, col: p.peek().col };
   p.advance(); // <>
 
-  // Target: dotted identifier
+  // Target: dotted identifier, possibly with path segments (/get, /create)
   let target = p.expectIdent();
-  while (p.peek().type === TokenType.DOT) {
-    p.advance();
-    target += "." + p.expectIdent();
+  while (
+    p.peek().type === TokenType.DOT ||
+    (p.peek().type === TokenType.IDENTIFIER && p.peek().value.startsWith("/"))
+  ) {
+    if (p.peek().type === TokenType.DOT) {
+      p.advance();
+      target += "." + p.expectIdent();
+    } else {
+      // Path segment like /get, /create
+      target += p.peek().value;
+      p.advance();
+    }
   }
 
   return {
