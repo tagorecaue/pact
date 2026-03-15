@@ -8,6 +8,7 @@ import { createDefaultProvider } from "./runtime/llm";
 import { startMockServer } from "./runtime/mock-server";
 import { detectDivergence, buildSchemaMap } from "./runtime/divergence";
 import { HttpClient } from "./runtime/http-client";
+import { Translator } from "./runtime/translator";
 import type { LoadedContract } from "./runtime/registry";
 
 const USAGE = `
@@ -18,11 +19,14 @@ Usage:
   pact inspect <file.pact>                  Show contract details
   pact inspect --evidence <file.pact>       Show evidence trail
   pact run <file.pact> [--input '<json>']   Execute a contract
+  pact new [--desc "<description>"]         Generate contract from natural language
   pact serve <contracts-dir>                Start HTTP server
   pact demo-heal [--port 4000]              Run self-healing demo
 
 Options:
   --input '<json>'    JSON input for contract execution
+  --desc "<text>"     Natural language description (non-interactive mode)
+  --output-dir <dir>  Output directory for generated contracts (default: contracts)
   --port <number>     HTTP server port (default: 3000 / 4000 for demo)
   --data-dir <path>   Data directory (default: data)
   --help              Show this help
@@ -47,6 +51,9 @@ async function main() {
       break;
     case "run":
       await cmdRun(args.slice(1));
+      break;
+    case "new":
+      await cmdNew(args.slice(1));
       break;
     case "serve":
       await cmdServe(args.slice(1));
@@ -242,6 +249,126 @@ function printFlowNode(node: any, indent: number): void {
     default:
       console.log(`${pad}[${node.kind}]`);
   }
+}
+
+// ── pact new ──
+
+async function promptInput(question: string): Promise<string> {
+  process.stdout.write(question);
+  return new Promise((resolve) => {
+    let data = "";
+    const onData = (chunk: Buffer) => {
+      data += chunk.toString();
+      if (data.includes("\n")) {
+        process.stdin.removeListener("data", onData);
+        process.stdin.pause();
+        resolve(data.trim());
+      }
+    };
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+  });
+}
+
+async function cmdNew(args: string[]) {
+  // Determine description from args
+  let description: string | null = null;
+
+  // Mode 1: --desc "description"
+  const descIdx = args.indexOf("--desc");
+  if (descIdx !== -1 && args[descIdx + 1]) {
+    description = args[descIdx + 1]!;
+  }
+
+  // Mode 2: pact new "description" (first non-flag arg)
+  if (!description) {
+    const positional = args.find((a) => !a.startsWith("--"));
+    if (positional) {
+      description = positional;
+    }
+  }
+
+  // Output directory
+  const outIdx = args.indexOf("--output-dir");
+  const outputDir = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1]! : "contracts";
+
+  // Mode 3: Interactive (no description provided)
+  if (!description) {
+    console.log("\n  pact new — Generate a contract from natural language\n");
+    description = await promptInput("  What should this contract do?\n  > ");
+    if (!description) {
+      console.error("\n  No description provided.");
+      process.exit(1);
+    }
+    console.log("");
+  }
+
+  // Check for LLM
+  const llm = createDefaultProvider();
+  if (!llm || !llm.isAvailable()) {
+    console.error("  No LLM configured.");
+    console.error("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
+    process.exit(1);
+  }
+
+  console.log(`  Generating contract...\n`);
+
+  const translator = new Translator({ llm, outputDir });
+  const result = await translator.generate(description);
+
+  if (!result.contractSource) {
+    console.error(`  Generation failed: ${result.error ?? "unknown error"}`);
+    process.exit(1);
+  }
+
+  // Display the generated contract
+  const name = result.contractName ?? "unnamed";
+  console.log(`  ${"─".repeat(50)}`);
+  console.log(`  ${name}`);
+  console.log(`  ${"─".repeat(50)}\n`);
+
+  // Show contract source with indentation
+  for (const line of result.contractSource.split("\n")) {
+    console.log(`  ${line}`);
+  }
+  console.log("");
+
+  // Show parse status
+  if (result.success) {
+    console.log(`  [parse] Valid contract`);
+  } else {
+    console.log(`  [parse] Warning: ${result.error}`);
+    console.log(`  The contract was saved but may need manual fixes.`);
+  }
+  console.log("");
+
+  // Show suggestions
+  if (result.suggestions && result.suggestions.length > 0) {
+    console.log("  Recommendations:");
+    for (let i = 0; i < result.suggestions.length; i++) {
+      console.log(`    ${i + 1}. ${result.suggestions[i]}`);
+    }
+    console.log("");
+  }
+
+  // Show gaps
+  if (result.gaps && result.gaps.length > 0) {
+    console.log("  Gaps detected:");
+    for (const gap of result.gaps) {
+      console.log(`    [${gap.category}] ${gap.question}`);
+      if (gap.suggestion) {
+        console.log(`      -> Suggested: ${gap.suggestion}`);
+      }
+    }
+    console.log("");
+  }
+
+  // Show save location
+  if (result.filePath) {
+    console.log(`  Saved to ${result.filePath}`);
+  }
+
+  console.log("");
 }
 
 // ── pact run ──
