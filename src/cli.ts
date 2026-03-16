@@ -11,31 +11,49 @@ import { HttpClient } from "./runtime/http-client";
 import { Translator } from "./runtime/translator";
 import { ConnectorRegistry } from "./runtime/connector";
 import { loadEnvFile } from "./runtime/env";
+import {
+  c,
+  printBanner,
+  success,
+  fail,
+  info,
+  warn,
+  step as uiStep,
+  header,
+  section,
+  keyValue,
+  divider,
+  createSpinner,
+  gapTag,
+  highlightPactLine,
+} from "./runtime/ui";
 import type { LoadedContract } from "./runtime/registry";
 
-const USAGE = `
-pact — The protocol that refuses to execute with ambiguity.
+function printUsage(): void {
+  printBanner();
+  console.log(`  ${c.dim}The protocol that refuses to execute with ambiguity.${c.reset}\n`);
 
-Usage:
-  pact parse <file.pact>                    Parse and show AST summary
-  pact inspect <file.pact>                  Show contract details
-  pact inspect --evidence <file.pact>       Show evidence trail
-  pact run <file.pact> [--input '<json>']   Execute a contract
-  pact new [--desc "<description>"]         Generate contract from natural language
-  pact serve <contracts-dir>                Start HTTP server
-  pact connectors                           List available connectors
-  pact demo-heal [--port 4000]              Run self-healing demo
+  console.log(`  ${c.bold}Usage:${c.reset}\n`);
+  console.log(`    ${c.cyan}pact parse${c.reset} <file.pact>                    Parse and show AST summary`);
+  console.log(`    ${c.cyan}pact inspect${c.reset} <file.pact>                  Show contract details`);
+  console.log(`    ${c.cyan}pact inspect${c.reset} --evidence <file.pact>       Show evidence trail`);
+  console.log(`    ${c.cyan}pact run${c.reset} <file.pact> [--input '<json>']   Execute a contract`);
+  console.log(`    ${c.cyan}pact new${c.reset} [--desc "<description>"]         Generate contract from natural language`);
+  console.log(`    ${c.cyan}pact serve${c.reset} <contracts-dir>                Start HTTP server`);
+  console.log(`    ${c.cyan}pact connectors${c.reset}                           List available connectors`);
+  console.log(`    ${c.cyan}pact demo-heal${c.reset} [--port 4000]              Run self-healing demo`);
 
-Options:
-  --input '<json>'      JSON input for contract execution
-  --desc "<text>"       Natural language description
-  --no-interactive      Skip interactive gap resolution (CI/scripts)
-  --auto-accept         Accept all gap suggestions automatically
-  --output-dir <dir>    Output directory for generated contracts (default: contracts)
-  --port <number>       HTTP server port (default: 3000 / 4000 for demo)
-  --data-dir <path>     Data directory (default: data)
-  --help                Show this help
-`.trim();
+  console.log(`\n  ${c.bold}Options:${c.reset}\n`);
+  console.log(`    ${c.yellow}--input${c.reset} '<json>'      JSON input for contract execution`);
+  console.log(`    ${c.yellow}--desc${c.reset} "<text>"       Natural language description`);
+  console.log(`    ${c.yellow}--no-interactive${c.reset}      Skip interactive gap resolution (CI/scripts)`);
+  console.log(`    ${c.yellow}--auto-accept${c.reset}         Accept all gap suggestions automatically`);
+  console.log(`    ${c.yellow}--output-dir${c.reset} <dir>    Output directory for generated contracts (default: contracts)`);
+  console.log(`    ${c.yellow}--port${c.reset} <number>       HTTP server port (default: 3000 / 4000 for demo)`);
+  console.log(`    ${c.yellow}--data-dir${c.reset} <path>     Data directory (default: data)`);
+  console.log(`    ${c.yellow}--help${c.reset}                Show this help`);
+  console.log("");
+}
 
 async function main() {
   loadEnvFile();
@@ -43,7 +61,7 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
-    console.log(USAGE);
+    printUsage();
     process.exit(0);
   }
 
@@ -72,8 +90,9 @@ async function main() {
       await cmdDemoHeal(args.slice(1));
       break;
     default:
-      console.error(`Unknown command: ${command}`);
-      console.log(USAGE);
+      fail(`Unknown command: ${c.bold}${command}${c.reset}`);
+      console.log("");
+      printUsage();
       process.exit(1);
   }
 }
@@ -83,7 +102,7 @@ async function main() {
 async function cmdParse(args: string[]) {
   const file = args[0];
   if (!file) {
-    console.error("Usage: pact parse <file.pact>");
+    fail("Usage: pact parse <file.pact>");
     process.exit(1);
   }
 
@@ -91,11 +110,12 @@ async function cmdParse(args: string[]) {
   try {
     const ast = parse(source);
     const sections = ast.sections.map((s) => s.kind.replace("Section", ""));
-    console.log(`✓ ${file}`);
-    console.log(`  version: ${ast.header.version}`);
-    console.log(`  sections (${sections.length}): ${sections.join(", ")}`);
+    success(`${c.bold}${file}${c.reset}`);
+    keyValue("  version", ast.header.version);
+    keyValue(`  sections (${sections.length})`, sections.map((s) => `${c.cyan}${s}${c.reset}`).join(", "));
   } catch (e: any) {
-    console.error(`✗ ${file}\n${e.message}`);
+    fail(`${c.bold}${file}${c.reset}`);
+    console.log(`    ${c.red}${e.message}${c.reset}`);
     process.exit(1);
   }
 }
@@ -107,7 +127,7 @@ async function cmdInspect(args: string[]) {
   const file = args.find((a) => a.endsWith(".pact"));
 
   if (!file) {
-    console.error("Usage: pact inspect [--evidence] <file.pact>");
+    fail("Usage: pact inspect [--evidence] <file.pact>");
     process.exit(1);
   }
 
@@ -116,73 +136,73 @@ async function cmdInspect(args: string[]) {
   const contracts = registry.getAll();
   const contract = contracts[0]!;
 
-  console.log(`\n── ${contract.name} ${contract.version} ──\n`);
+  header(`${contract.name} ${c.dim}${contract.version}${c.reset}`);
 
   if (contract.domain) {
-    console.log(`  domain:   ${contract.domain}`);
+    keyValue("  domain", contract.domain);
   }
 
-  const c = contract.sections;
+  const ct = contract.sections;
 
-  if (c.intent) {
-    console.log(`\n  @I Intent`);
-    if (c.intent.natural) console.log(`    natural:  "${c.intent.natural}"`);
-    if (c.intent.priority) console.log(`    priority: ${c.intent.priority}`);
-    if (c.intent.timeout) console.log(`    timeout:  ${c.intent.timeout}`);
-    if (c.intent.accept) {
-      console.log(`    accept:`);
-      for (const a of c.intent.accept) console.log(`      - "${a}"`);
+  if (ct.intent) {
+    section("  @I Intent");
+    if (ct.intent.natural) console.log(`    ${c.gray}natural:${c.reset}  ${c.green}"${ct.intent.natural}"${c.reset}`);
+    if (ct.intent.priority) console.log(`    ${c.gray}priority:${c.reset} ${c.yellow}${ct.intent.priority}${c.reset}`);
+    if (ct.intent.timeout) console.log(`    ${c.gray}timeout:${c.reset}  ${ct.intent.timeout}`);
+    if (ct.intent.accept) {
+      console.log(`    ${c.gray}accept:${c.reset}`);
+      for (const a of ct.intent.accept) console.log(`      ${c.green}-${c.reset} "${a}"`);
     }
-    if (c.intent.reject) {
-      console.log(`    reject:`);
-      for (const r of c.intent.reject) console.log(`      - "${r}"`);
+    if (ct.intent.reject) {
+      console.log(`    ${c.gray}reject:${c.reset}`);
+      for (const r of ct.intent.reject) console.log(`      ${c.red}-${c.reset} "${r}"`);
     }
   }
 
-  if (c.entities) {
-    console.log(`\n  @E Entities`);
-    for (const entity of c.entities.entities) {
-      console.log(`    ${entity.name}:`);
+  if (ct.entities) {
+    section("  @E Entities");
+    for (const entity of ct.entities.entities) {
+      console.log(`    ${c.bold}${entity.name}:${c.reset}`);
       for (const field of entity.fields) {
         const mods = field.modifiers.join("");
-        const def = field.defaultValue ? ` =${field.defaultValue}` : "";
+        const def = field.defaultValue ? ` ${c.dim}=${field.defaultValue}${c.reset}` : "";
         const typeName =
           field.type.kind === "PrimitiveType"
             ? field.type.name
             : field.type.kind === "EnumType"
               ? `enum(${field.type.variants.join(",")})`
               : field.type.kind;
-        console.log(`      ${field.name} ${typeName}${mods ? " " + mods : ""}${def}`);
+        console.log(`      ${c.white}${field.name}${c.reset} ${c.blue}${typeName}${c.reset}${mods ? " " + c.yellow + mods + c.reset : ""}${def}`);
       }
     }
   }
 
-  if (c.execution) {
-    console.log(`\n  @X Execution`);
-    console.log(`    ${c.execution.flow.length} top-level flow nodes`);
-    for (const node of c.execution.flow) {
+  if (ct.execution) {
+    section("  @X Execution");
+    console.log(`    ${c.dim}${ct.execution.flow.length} top-level flow nodes${c.reset}`);
+    for (const node of ct.execution.flow) {
       printFlowNode(node, 4);
     }
   }
 
-  if (c.fallbacks) {
-    console.log(`\n  @F Fallbacks`);
-    for (const h of c.fallbacks.handlers) {
-      console.log(`    on ${h.event}: ${h.actions.length} action(s)`);
+  if (ct.fallbacks) {
+    section("  @F Fallbacks");
+    for (const h of ct.fallbacks.handlers) {
+      console.log(`    ${c.yellow}on${c.reset} ${h.event}: ${c.dim}${h.actions.length} action(s)${c.reset}`);
     }
   }
 
-  if (c.triggers) {
-    console.log(`\n  @T Triggers`);
-    for (const t of c.triggers.triggers) {
-      console.log(`    ${t.type} ${t.args.join(" ")}`);
+  if (ct.triggers) {
+    section("  @T Triggers");
+    for (const t of ct.triggers.triggers) {
+      console.log(`    ${c.cyan}${t.type}${c.reset} ${t.args.join(" ")}`);
     }
   }
 
-  if (c.dependencies) {
-    console.log(`\n  @D Dependencies`);
-    for (const d of c.dependencies.deps) {
-      console.log(`    #${d.contract} ${d.versionConstraints.join(" ")}`);
+  if (ct.dependencies) {
+    section("  @D Dependencies");
+    for (const d of ct.dependencies.deps) {
+      console.log(`    ${c.magenta}#${d.contract}${c.reset} ${c.dim}${d.versionConstraints.join(" ")}${c.reset}`);
     }
   }
 
@@ -194,18 +214,20 @@ async function cmdInspect(args: string[]) {
       store.close();
 
       if (evidence.length === 0) {
-        console.log(`\n  @V Evidence: (none recorded)`);
+        section("  @V Evidence");
+        console.log(`    ${c.dim}(none recorded)${c.reset}`);
       } else {
-        console.log(`\n  @V Evidence (${evidence.length} entries)`);
+        section(`  @V Evidence ${c.dim}(${evidence.length} entries)${c.reset}`);
         for (const e of evidence) {
-          const status = e.status === "success" ? "✓" : "✗";
+          const icon = e.status === "success" ? `${c.green}\u2713${c.reset}` : `${c.red}\u2717${c.reset}`;
           console.log(
-            `    ${status} ${e.step_name} [${e.duration_ms}ms] ${e.status} (${e.timestamp})`,
+            `    ${icon} ${e.step_name} ${c.dim}[${e.duration_ms}ms]${c.reset} ${e.status === "success" ? c.green : c.red}${e.status}${c.reset} ${c.dim}(${e.timestamp})${c.reset}`,
           );
         }
       }
     } catch {
-      console.log(`\n  @V Evidence: (no evidence database found)`);
+      section("  @V Evidence");
+      console.log(`    ${c.dim}(no evidence database found)${c.reset}`);
     }
   }
 
@@ -216,11 +238,11 @@ function printFlowNode(node: any, indent: number): void {
   const pad = " ".repeat(indent);
   switch (node.kind) {
     case "StepNode":
-      console.log(`${pad}→ ${node.name}${node.args.length ? " " + node.args.join(" ") : ""}`);
+      console.log(`${pad}${c.cyan}\u2192${c.reset} ${c.bold}${node.name}${c.reset}${node.args.length ? " " + c.dim + node.args.join(" ") + c.reset : ""}`);
       break;
     case "PipeExpr":
       printFlowNode(node.left, indent);
-      console.log(`${pad}>> `);
+      console.log(`${pad}${c.yellow}>>${c.reset} `);
       printFlowNode(node.right, indent);
       break;
     case "SequenceExpr":
@@ -228,36 +250,36 @@ function printFlowNode(node: any, indent: number): void {
       printFlowNode(node.right, indent);
       break;
     case "ConditionalExpr":
-      console.log(`${pad}? (condition)`);
+      console.log(`${pad}${c.yellow}?${c.reset} ${c.dim}(condition)${c.reset}`);
       for (const child of node.then) printFlowNode(child, indent + 2);
       if (node.else) {
-        console.log(`${pad}?!`);
+        console.log(`${pad}${c.yellow}?!${c.reset}`);
         for (const child of node.else) printFlowNode(child, indent + 2);
       }
       break;
     case "MatchExpr":
-      console.log(`${pad}?? match`);
+      console.log(`${pad}${c.yellow}??${c.reset} match`);
       for (const arm of node.arms) {
-        console.log(`${pad}  ${arm.pattern}:`);
+        console.log(`${pad}  ${c.cyan}${arm.pattern}:${c.reset}`);
         for (const child of arm.body) printFlowNode(child, indent + 4);
       }
       break;
     case "LoopExpr":
-      console.log(`${pad}* loop (max ${node.max})`);
+      console.log(`${pad}${c.yellow}*${c.reset} loop ${c.dim}(max ${node.max})${c.reset}`);
       for (const child of node.body) printFlowNode(child, indent + 2);
       break;
     case "ExchangeExpr":
-      console.log(`${pad}<> ${node.target}`);
+      console.log(`${pad}${c.magenta}<>${c.reset} ${node.target}`);
       break;
     case "DelegateExpr":
-      console.log(`${pad}@> ${node.contract}`);
+      console.log(`${pad}${c.magenta}@>${c.reset} ${node.contract}`);
       break;
     case "AsyncExpr":
-      console.log(`${pad}~>`);
+      console.log(`${pad}${c.magenta}~>${c.reset}`);
       printFlowNode(node.step, indent + 2);
       break;
     default:
-      console.log(`${pad}[${node.kind}]`);
+      console.log(`${pad}${c.dim}[${node.kind}]${c.reset}`);
   }
 }
 
@@ -285,8 +307,10 @@ async function cmdConnectors(_args: string[]) {
   }
 
   if (!loaded || registry.count() === 0) {
-    console.log("\n  No connectors found.");
-    console.log("  Place .pact connector files in connectors/community/\n");
+    console.log("");
+    warn("No connectors found.");
+    info("Place .pact connector files in connectors/community/");
+    console.log("");
     return;
   }
 
@@ -296,7 +320,6 @@ async function cmdConnectors(_args: string[]) {
   // Group by category
   const categories: Record<string, typeof connectors> = {};
   for (const conn of connectors) {
-    // Derive category from the connector's authEnv or name pattern
     let category = "Other";
     const name = conn.name.toLowerCase();
     if (name.includes("connector.telegram") || name.includes("connector.slack") || name.includes("connector.discord") || name.includes("connector.whatsapp")) {
@@ -327,18 +350,16 @@ async function cmdConnectors(_args: string[]) {
     categories[category]!.push(conn);
   }
 
-  console.log(`\nAvailable connectors (${total}):\n`);
+  header(`Available connectors ${c.dim}(${total})${c.reset}`);
 
-  // Sort categories in a logical order
   const categoryOrder = ["Messaging", "Payments", "Email", "SMS", "Dev Tools", "AI", "Storage", "Databases", "Productivity", "Monitoring", "Custom", "Other"];
 
   for (const cat of categoryOrder) {
     const conns = categories[cat];
     if (!conns || conns.length === 0) continue;
 
-    console.log(`  ${cat}:`);
+    console.log(`  ${c.cyan}${c.bold}${cat}:${c.reset}`);
     for (const conn of conns) {
-      // Derive short name
       let shortName = conn.name;
       if (shortName.startsWith("connector.")) shortName = shortName.slice(10);
       if (shortName.endsWith("-connector")) shortName = shortName.slice(0, -10);
@@ -346,7 +367,7 @@ async function cmdConnectors(_args: string[]) {
       const opCount = conn.operations.size;
       const envVar = conn.authEnv || "N/A";
       const pad = " ".repeat(Math.max(1, 16 - shortName.length));
-      console.log(`    ${shortName}${pad}${opCount} operation${opCount !== 1 ? "s" : ""}  (env: ${envVar})`);
+      console.log(`    ${c.white}${shortName}${c.reset}${pad}${c.dim}${opCount} operation${opCount !== 1 ? "s" : ""}${c.reset}  ${c.yellow}(env: ${envVar})${c.reset}`);
     }
     console.log("");
   }
@@ -379,13 +400,11 @@ async function cmdNew(args: string[]) {
   // Determine description from args
   let description: string | null = null;
 
-  // Mode 1: --desc "description"
   const descIdx = args.indexOf("--desc");
   if (descIdx !== -1 && args[descIdx + 1]) {
     description = args[descIdx + 1]!;
   }
 
-  // Mode 2: pact new "description" (first non-flag arg)
   if (!description) {
     const positional = args.find((a) => !a.startsWith("--"));
     if (positional) {
@@ -393,24 +412,23 @@ async function cmdNew(args: string[]) {
     }
   }
 
-  // Output directory
   const outIdx = args.indexOf("--output-dir");
   const outputDir = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1]! : "contracts";
 
-  // Create readline interface (used for interactive prompts)
   const prompt = !noInteractive ? createPrompt() : null;
 
   try {
-    // Phase 1 — Get description
+    // Phase 1 -- Get description
     if (!description) {
       if (noInteractive) {
-        console.error("  --no-interactive requires --desc or a positional description.");
+        fail("--no-interactive requires --desc or a positional description.");
         process.exit(1);
       }
-      console.log("\n  pact new — Generate a contract from natural language\n");
-      description = await prompt!.ask("  What should this contract do?\n  > ");
+      header("pact new");
+      info("Generate a contract from natural language\n");
+      description = await prompt!.ask(`  ${c.cyan}\u203a${c.reset} What should this contract do?\n  ${c.bold}>${c.reset} `);
       if (!description) {
-        console.error("\n  No description provided.");
+        fail("No description provided.");
         process.exit(1);
       }
       console.log("");
@@ -419,21 +437,24 @@ async function cmdNew(args: string[]) {
     // Check for LLM
     const llm = createDefaultProvider();
     if (!llm || !llm.isAvailable()) {
-      console.error("  No LLM configured.");
-      console.error("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
+      fail("No LLM configured.");
+      warn("Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
       process.exit(1);
     }
 
-    // Phase 2 — Generate initial contract
-    console.log(`  Generating contract...\n`);
+    // Phase 2 -- Generate initial contract
+    const spinner = createSpinner("Generating contract...");
 
     const translator = new Translator({ llm, outputDir });
     const result = await translator.generate(description);
 
     if (!result.contractSource) {
-      console.error(`  Generation failed: ${result.error ?? "unknown error"}`);
+      spinner.stop(`${c.red}Generation failed${c.reset}`);
+      fail(`${result.error ?? "unknown error"}`);
       process.exit(1);
     }
+
+    spinner.stop("Contract generated");
 
     let contractSource = result.contractSource;
     let contractName = result.contractName ?? "unnamed";
@@ -447,95 +468,94 @@ async function cmdNew(args: string[]) {
           .flatMap((s: any) => s.entities.map((e: any) => e.name))
       : [];
 
-    console.log(`  ${"─".repeat(50)}`);
-    console.log(`  ${contractName}  v${ast?.header.version ?? "?"}`);
-    console.log(`  ${sectionCount} sections${entityNames.length > 0 ? ", entities: " + entityNames.join(", ") : ""}`);
-    console.log(`  ${"─".repeat(50)}\n`);
+    console.log("");
+    divider();
+    console.log(`  ${c.bold}${contractName}${c.reset}  ${c.dim}v${ast?.header.version ?? "?"}${c.reset}`);
+    console.log(`  ${c.dim}${sectionCount} sections${entityNames.length > 0 ? ", entities: " + entityNames.join(", ") : ""}${c.reset}`);
+    divider();
+    console.log("");
 
-    // Show contract source with indentation
+    // Show contract source with syntax highlighting
     for (const line of contractSource.split("\n")) {
-      console.log(`  ${line}`);
+      console.log(`  ${highlightPactLine(line)}`);
     }
     console.log("");
 
     // Show parse status
     if (result.success) {
-      console.log(`  [parse] Valid contract`);
+      success(`${c.dim}[parse]${c.reset} Valid contract`);
     } else {
-      console.log(`  [parse] Warning: ${result.error}`);
-      console.log(`  The contract may need manual fixes.`);
+      warn(`${c.dim}[parse]${c.reset} ${result.error}`);
+      warn("The contract may need manual fixes.");
     }
     console.log("");
 
-    // Phase 3 — Interactive gap resolution
+    // Phase 3 -- Interactive gap resolution
     const gaps = result.gaps ?? [];
     const gapAnswers: { question: string; answer: string }[] = [];
 
     if (gaps.length > 0 && !noInteractive) {
-      console.log(`  ${gaps.length} gap(s) detected:\n`);
+      section(`  ${gaps.length} gap(s) detected`);
+      console.log("");
 
       for (let i = 0; i < gaps.length; i++) {
         const gap = gaps[i]!;
-        console.log(`  Gap ${i + 1}/${gaps.length} [${gap.category}]`);
+        console.log(`  ${c.cyan}[${i + 1}/${gaps.length}]${c.reset} ${gapTag(gap.category)}`);
         console.log(`  ${gap.question}`);
         if (gap.suggestion) {
-          console.log(`  -> Suggested: ${gap.suggestion}`);
+          info(`Suggested: ${c.green}${gap.suggestion}${c.reset}`);
         }
 
         let choice: string;
         if (autoAccept) {
           choice = "y";
-          console.log(`  [Y]es / [n]o / [c]ustom: y (auto-accept)`);
+          console.log(`  ${c.dim}[Y]es / [n]o / [c]ustom: y (auto-accept)${c.reset}`);
         } else {
-          choice = await prompt!.ask("  [Y]es / [n]o / [c]ustom: ");
+          choice = await prompt!.ask(`  ${c.dim}[Y]es / [n]o / [c]ustom:${c.reset} `);
         }
 
-        const key = choice.toLowerCase() || "y"; // Enter = yes
+        const key = choice.toLowerCase() || "y";
 
         if (key === "y" || key === "yes") {
           if (gap.suggestion) {
             gapAnswers.push({ question: gap.question, answer: gap.suggestion });
-            console.log(`  -> Accepted\n`);
+            success("Accepted\n");
           } else {
-            // No suggestion to accept, ask for custom answer
             let custom: string;
             if (autoAccept) {
-              console.log(`  (no suggestion to accept, skipping)\n`);
+              console.log(`  ${c.dim}(no suggestion to accept, skipping)${c.reset}\n`);
             } else {
-              custom = await prompt!.ask("  Your answer: ");
+              custom = await prompt!.ask(`  ${c.bold}Your answer:${c.reset} `);
               if (custom) {
                 gapAnswers.push({ question: gap.question, answer: custom });
-                console.log(`  -> Recorded\n`);
+                success("Recorded\n");
               } else {
-                console.log(`  -> Skipped\n`);
+                warn("Skipped\n");
               }
             }
           }
         } else if (key === "c" || key === "custom") {
-          const custom = autoAccept ? "" : await prompt!.ask("  Your answer: ");
+          const custom = autoAccept ? "" : await prompt!.ask(`  ${c.bold}Your answer:${c.reset} `);
           if (custom) {
             gapAnswers.push({ question: gap.question, answer: custom });
-            console.log(`  -> Recorded\n`);
+            success("Recorded\n");
           } else {
-            console.log(`  -> Skipped\n`);
+            warn("Skipped\n");
           }
         } else {
-          // n or anything else = skip
-          console.log(`  -> Skipped\n`);
+          warn("Skipped\n");
         }
       }
     } else if (gaps.length > 0 && noInteractive) {
-      // Non-interactive: just dump gaps
-      console.log("  Gaps detected:");
+      section("  Gaps detected");
       for (const gap of gaps) {
-        console.log(`    [${gap.category}] ${gap.question}`);
+        console.log(`    ${gapTag(gap.category)} ${gap.question}`);
         if (gap.suggestion) {
-          console.log(`      -> Suggested: ${gap.suggestion}`);
+          info(`Suggested: ${c.green}${gap.suggestion}${c.reset}`);
         }
       }
       console.log("");
 
-      // Auto-accept mode in non-interactive: accept all suggestions
       if (autoAccept) {
         for (const gap of gaps) {
           if (gap.suggestion) {
@@ -545,75 +565,77 @@ async function cmdNew(args: string[]) {
       }
     }
 
-    // Phase 4 — Apply gaps
+    // Phase 4 -- Apply gaps
     if (gapAnswers.length > 0) {
-      console.log(`  Applying ${gapAnswers.length} gap(s) to contract...\n`);
+      const refineSpinner = createSpinner(`Applying ${gapAnswers.length} gap(s) to contract...`);
       const refined = await translator.refineWithGaps(contractSource, gapAnswers);
 
       if (refined.contractSource) {
+        refineSpinner.stop("Gaps applied");
         contractSource = refined.contractSource;
         contractName = refined.contractName ?? contractName;
 
-        // Show updated contract
-        console.log(`  ${"─".repeat(50)}`);
-        console.log(`  ${contractName} (refined)`);
-        console.log(`  ${"─".repeat(50)}\n`);
+        console.log("");
+        divider();
+        console.log(`  ${c.bold}${contractName}${c.reset} ${c.dim}(refined)${c.reset}`);
+        divider();
+        console.log("");
 
         for (const line of contractSource.split("\n")) {
-          console.log(`  ${line}`);
+          console.log(`  ${highlightPactLine(line)}`);
         }
         console.log("");
 
         if (refined.success) {
-          console.log(`  [parse] Valid contract`);
+          success(`${c.dim}[parse]${c.reset} Valid contract`);
         } else {
-          console.log(`  [parse] Warning: ${refined.error}`);
+          warn(`${c.dim}[parse]${c.reset} ${refined.error}`);
         }
         console.log("");
       } else {
-        console.log(`  Refinement failed: ${refined.error ?? "unknown error"}`);
-        console.log(`  Keeping original contract.\n`);
+        refineSpinner.stop(`${c.red}Refinement failed${c.reset}`);
+        fail(`${refined.error ?? "unknown error"}`);
+        warn("Keeping original contract.\n");
       }
     }
 
-    // Phase 5 — Show recommendations
+    // Phase 5 -- Show recommendations
     const suggestions = result.suggestions ?? [];
     if (suggestions.length > 0) {
-      console.log("  Recommendations:");
+      section("  Recommendations");
       for (let i = 0; i < suggestions.length; i++) {
-        console.log(`    ${i + 1}. ${suggestions[i]}`);
+        console.log(`    ${c.blue}\u203a${c.reset} ${suggestions[i]}`);
       }
       console.log("");
     }
 
-    // Phase 6 — Save
+    // Phase 6 -- Save
     if (noInteractive) {
-      // Non-interactive: save automatically
       const filePath = translator.saveContract(contractSource, contractName);
       if (filePath) {
-        console.log(`  Saved to ${filePath}`);
+        success(`Saved to ${c.bold}${filePath}${c.reset}`);
       }
     } else {
-      const saveAnswer = await prompt!.ask(`  Save to contracts/${contractName}.pact? [Y/n]: `);
+      const saveAnswer = await prompt!.ask(`  Save to ${c.cyan}contracts/${contractName}.pact${c.reset}? ${c.dim}[Y/n]:${c.reset} `);
       const doSave = !saveAnswer || saveAnswer.toLowerCase() === "y" || saveAnswer.toLowerCase() === "yes";
 
       if (doSave) {
         const filePath = translator.saveContract(contractSource, contractName);
         if (filePath) {
-          console.log(`  Saved to ${filePath}`);
+          success(`Saved to ${c.bold}${filePath}${c.reset}`);
         } else {
-          console.log(`  Save failed. Here is the contract source:\n`);
+          fail("Save failed. Here is the contract source:\n");
           console.log(contractSource);
         }
       } else {
-        console.log(`\n  Contract source (copy/paste):\n`);
+        section("  Contract source (copy/paste)");
+        console.log("");
         console.log(contractSource);
       }
     }
 
     console.log("");
   } finally {
-    // IMPORTANT: Close readline before exit to prevent hanging
     if (prompt) {
       prompt.close();
     }
@@ -625,7 +647,7 @@ async function cmdNew(args: string[]) {
 async function cmdRun(args: string[]) {
   const file = args.find((a) => a.endsWith(".pact"));
   if (!file) {
-    console.error("Usage: pact run <file.pact> [--input '<json>']");
+    fail("Usage: pact run <file.pact> [--input '<json>']");
     process.exit(1);
   }
 
@@ -636,7 +658,7 @@ async function cmdRun(args: string[]) {
     try {
       input = JSON.parse(args[inputIdx + 1]!);
     } catch {
-      console.error("Invalid JSON for --input");
+      fail("Invalid JSON for --input");
       process.exit(1);
     }
   }
@@ -648,52 +670,54 @@ async function cmdRun(args: string[]) {
   registry.loadFile(file);
   const contract = registry.getAll()[0]!;
 
-  // Detect execution mode: @X (deterministic) vs @R (AI reasoning)
+  // Detect execution mode
   const hasExecution = contract.sections.execution;
   const hasReasoning = contract.ast.sections.some((s) => s.kind === "ReasoningSection");
 
   const evidence = new EvidenceStore(dataDir);
 
-  console.log(`\n── pact run: ${contract.name} ${contract.version} ──\n`);
-  console.log(`  input: ${JSON.stringify(input)}`);
-  console.log(`  mode:  ${hasReasoning ? "reasoning (@R)" : "deterministic (@X)"}`);
+  header(`pact run: ${contract.name} ${c.dim}${contract.version}${c.reset}`);
+  keyValue("  input", JSON.stringify(input));
+  keyValue("  mode", hasReasoning ? `${c.magenta}reasoning (@R)${c.reset}` : `${c.magenta}deterministic (@X)${c.reset}`);
   console.log("");
 
   let result;
   if (hasReasoning) {
-    // AI reasoning mode
     const llm = createDefaultProvider();
     if (!llm) {
-      console.error("  No LLM configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
+      fail("No LLM configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run ./setup.sh");
       evidence.close();
       process.exit(1);
     }
-    console.log(`  llm:   ${llm.name}`);
+    keyValue("  llm", llm.name);
     console.log("");
     const aiExecutor = new AiExecutor({ llm, evidence });
     result = await aiExecutor.execute(contract, input);
   } else {
-    // Deterministic mode
     const engine = new ExecutionEngine(evidence);
     result = await engine.execute(contract, input);
   }
 
   // Display results
   for (const step of result.steps) {
-    const icon = step.status === "success" ? "✓" : "✗";
-    console.log(`  ${icon} ${step.name} [${step.durationMs}ms]`);
-    if (step.error) console.log(`    error: ${step.error}`);
+    if (step.status === "success") {
+      success(`${c.bold}${step.name}${c.reset} ${c.dim}[${step.durationMs}ms]${c.reset}`);
+    } else {
+      fail(`${c.bold}${step.name}${c.reset} ${c.dim}[${step.durationMs}ms]${c.reset}`);
+    }
+    if (step.error) console.log(`    ${c.red}error: ${step.error}${c.reset}`);
   }
 
   console.log("");
-  console.log(`  status:   ${result.status}`);
-  console.log(`  duration: ${result.durationMs}ms`);
-  console.log(`  request:  ${result.requestId}`);
-  if (result.error) console.log(`  error:    ${result.error}`);
+  const statusColor = result.status === "success" ? c.green : c.red;
+  keyValue("  status", `${statusColor}${c.bold}${result.status}${c.reset}`);
+  keyValue("  duration", `${c.dim}${result.durationMs}ms${c.reset}`);
+  keyValue("  request", `${c.dim}${result.requestId}${c.reset}`);
+  if (result.error) keyValue("  error", `${c.red}${result.error}${c.reset}`);
 
   // Show evidence count
   const trail = evidence.getByRequest(result.requestId);
-  console.log(`  evidence: ${trail.length} entries recorded`);
+  keyValue("  evidence", `${c.dim}${trail.length} entries recorded${c.reset}`);
   console.log("");
 
   evidence.close();
@@ -711,14 +735,14 @@ async function cmdServe(args: string[]) {
   const dataDirIdx = args.indexOf("--data-dir");
   const dataDir = dataDirIdx !== -1 ? args[dataDirIdx + 1]! : "data";
 
-  console.log(`\n── pact serve ──`);
-  console.log(`  contracts: ${contractsDir}`);
-  console.log(`  data:      ${dataDir}`);
+  printBanner();
+  keyValue("  contracts", contractsDir);
+  keyValue("  data", dataDir);
 
   const server = new PactServer({ contractsDir, port, dataDir });
 
   process.on("SIGINT", () => {
-    console.log("\n  shutting down...");
+    console.log(`\n  ${c.dim}shutting down...${c.reset}`);
     server.stop();
     process.exit(0);
   });
@@ -733,21 +757,20 @@ async function cmdDemoHeal(args: string[]) {
   const port = portIdx !== -1 ? parseInt(args[portIdx + 1]!, 10) : 4000;
   const dataDir = args.find((a, i) => args[i - 1] === "--data-dir") ?? "data";
 
-  console.log(`\n${"=".repeat(60)}`);
-  console.log(`  PACT SELF-HEALING DEMO`);
-  console.log(`${"=".repeat(60)}\n`);
+  printBanner();
+  header("SELF-HEALING DEMO");
 
   // Step 1: Start mock server with schema v1
-  console.log(`[1/6] Starting mock API server on port ${port} (schema v1)...`);
+  uiStep(1, 6, `Starting mock API server on port ${c.bold}${port}${c.reset} ${c.dim}(schema v1)${c.reset}`);
   const mock = startMockServer(port);
-  console.log(`      Mock server running. Schema: v1`);
-  console.log(`      Fields: id, name, price, in_stock\n`);
+  info(`Mock server running. Schema: ${c.bold}v1${c.reset}`);
+  info(`Fields: ${c.cyan}id${c.reset}, ${c.cyan}name${c.reset}, ${c.cyan}price${c.reset}, ${c.cyan}in_stock${c.reset}`);
+  console.log("");
 
   // Step 2: Load the product-sync contract
-  console.log(`[2/6] Loading product-sync.pact...`);
+  uiStep(2, 6, "Loading product-sync.pact...");
   const registry = new ContractRegistry();
 
-  // Find the contract file — check a few standard locations
   const contractPaths = [
     "contracts/product-sync.pact",
     `${process.cwd()}/contracts/product-sync.pact`,
@@ -763,56 +786,58 @@ async function cmdDemoHeal(args: string[]) {
     }
   }
   if (!contractFile) {
-    console.error("      Could not find contracts/product-sync.pact");
+    fail("Could not find contracts/product-sync.pact");
     mock.stop();
     process.exit(1);
   }
 
   registry.loadFile(contractFile);
   const contract = registry.getAll()[0]!;
-  console.log(`      Contract: ${contract.name} v${contract.version}`);
-  console.log(`      Domain:   ${contract.domain}`);
-  console.log(`      Intent:   ${contract.sections.intent?.natural ?? "N/A"}\n`);
+  keyValue("    contract", `${c.bold}${contract.name}${c.reset} v${contract.version}`);
+  keyValue("    domain", contract.domain ?? "N/A");
+  keyValue("    intent", contract.sections.intent?.natural ?? "N/A");
+  console.log("");
 
   const evidence = new EvidenceStore(dataDir);
   const llm = createDefaultProvider();
   const httpClient = new HttpClient({ maxRetries: 0, retryDelayMs: 0 });
 
   // Step 3: Execute contract with schema v1
-  console.log(`[3/6] Executing contract with schema v1...`);
+  uiStep(3, 6, `Executing contract with schema ${c.bold}v1${c.reset}...`);
   const engine1 = new ExecutionEngine(evidence, httpClient, llm ?? undefined);
   const input1 = { _base_url: `http://localhost:${port}`, _contract: contract };
 
   const result1 = await engine1.execute(contract, input1);
 
   for (const step of result1.steps) {
-    const icon = step.status === "success" ? "[OK]" : "[FAIL]";
-    console.log(`      ${icon} ${step.name} [${step.durationMs}ms]`);
+    if (step.status === "success") {
+      console.log(`      ${c.green}${c.bold}[OK]${c.reset}   ${step.name} ${c.dim}[${step.durationMs}ms]${c.reset}`);
+    } else {
+      console.log(`      ${c.red}${c.bold}[FAIL]${c.reset} ${step.name} ${c.dim}[${step.durationMs}ms]${c.reset}`);
+    }
   }
-  console.log(`      Status: ${result1.status} (${result1.durationMs}ms)`);
+  const status1Color = result1.status === "success" ? c.green : c.yellow;
+  console.log(`      ${status1Color}Status: ${result1.status}${c.reset} ${c.dim}(${result1.durationMs}ms)${c.reset}`);
 
   if (result1.status !== "success") {
-    console.log(`      Warning: contract execution failed on v1 schema.`);
-    console.log(`      This is expected if the exchange target doesn't match the URL pattern.`);
+    warn("Contract execution failed on v1 schema.");
+    info("This is expected if the exchange target doesn't match the URL pattern.");
   }
   console.log("");
 
   // Step 4: Switch to schema v2
-  console.log(`[4/6] Switching mock server to schema v2...`);
+  uiStep(4, 6, `Switching mock server to schema ${c.bold}v2${c.reset}...`);
   mock.switchSchema();
-  console.log(`      Schema switched to: ${mock.getSchemaVersion()}`);
-  console.log(`      Fields: id, name, price_cents, currency, available`);
-  console.log(`      Changes: price -> price_cents, in_stock -> available, +currency\n`);
+  info(`Schema switched to: ${c.bold}${mock.getSchemaVersion()}${c.reset}`);
+  info(`Fields: ${c.cyan}id${c.reset}, ${c.cyan}name${c.reset}, ${c.cyan}price_cents${c.reset}, ${c.cyan}currency${c.reset}, ${c.cyan}available${c.reset}`);
+  console.log(`    Changes: ${c.red}price${c.reset} -> ${c.green}price_cents${c.reset}, ${c.red}in_stock${c.reset} -> ${c.green}available${c.reset}, ${c.green}+currency${c.reset}`);
+  console.log("");
 
-  // Step 5: Execute contract again — should detect divergence
-  console.log(`[5/6] Executing contract with schema v2 (divergence expected)...`);
+  // Step 5: Execute contract again
+  uiStep(5, 6, `Executing contract with schema ${c.bold}v2${c.reset} ${c.dim}(divergence expected)${c.reset}...`);
   const engine2 = new ExecutionEngine(evidence, httpClient, llm ?? undefined);
-
-  // Seed the schema cache from engine1 to simulate "known" schema
-  // We need to share the schema knowledge from the first run
   const input2 = { _base_url: `http://localhost:${port}`, _contract: contract };
 
-  // First, manually fetch v2 to demonstrate divergence detection
   const v1Fields = ["id", "name", "price", "in_stock"];
   const v1Schema: Record<string, string> = {
     id: "number",
@@ -821,7 +846,6 @@ async function cmdDemoHeal(args: string[]) {
     in_stock: "boolean",
   };
 
-  // Fetch from mock server to get v2 response
   const v2Response = await httpClient.request({
     method: "GET",
     url: `http://localhost:${port}/api/products`,
@@ -837,34 +861,36 @@ async function cmdDemoHeal(args: string[]) {
 
   const divergence = detectDivergence(v1Fields, v1Schema, v2Body, `localhost:${port}/api/products`);
 
-  console.log(`      Response received. Checking for divergences...`);
+  info("Response received. Checking for divergences...");
   console.log("");
 
   // Step 6: Show divergence report
-  console.log(`[6/6] Divergence Report:`);
-  console.log(`      ${"-".repeat(50)}`);
-  console.log(`      Target:      ${divergence.target}`);
-  console.log(`      Timestamp:   ${divergence.timestamp}`);
-  console.log(`      High impact: ${divergence.hasHighImpact ? "YES" : "no"}`);
-  console.log(`      Summary:     ${divergence.summary}`);
+  uiStep(6, 6, `${c.bold}Divergence Report${c.reset}`);
+  divider();
+  keyValue("    target", divergence.target);
+  keyValue("    timestamp", divergence.timestamp);
+  keyValue("    high impact", divergence.hasHighImpact ? `${c.red}${c.bold}YES${c.reset}` : `${c.dim}no${c.reset}`);
+  keyValue("    summary", divergence.summary);
   console.log("");
 
   if (divergence.divergences.length > 0) {
-    console.log(`      Divergences:`);
+    console.log(`    ${c.bold}Divergences:${c.reset}`);
     for (const d of divergence.divergences) {
-      const impactTag = d.impact === "high" ? "[HIGH]" : "[low] ";
+      const impactTag = d.impact === "high"
+        ? `${c.red}${c.bold}[HIGH]${c.reset}`
+        : `${c.yellow}[low] ${c.reset}`;
       switch (d.type) {
         case "field_removed":
-          console.log(`        ${impactTag} REMOVED: "${d.field}" (was ${d.expected})`);
+          console.log(`      ${impactTag} ${c.red}REMOVED${c.reset}: "${d.field}" ${c.dim}(was ${d.expected})${c.reset}`);
           break;
         case "field_added":
-          console.log(`        ${impactTag} ADDED:   "${d.field}" (type: ${d.received})`);
+          console.log(`      ${impactTag} ${c.green}ADDED${c.reset}:   "${d.field}" ${c.dim}(type: ${d.received})${c.reset}`);
           break;
         case "field_type_changed":
-          console.log(`        ${impactTag} CHANGED: "${d.field}" (${d.expected} -> ${d.received})`);
+          console.log(`      ${impactTag} CHANGED: "${d.field}" ${c.dim}(${c.red}${d.expected}${c.dim} -> ${c.green}${d.received}${c.dim})${c.reset}`);
           break;
         case "field_renamed":
-          console.log(`        ${impactTag} RENAMED: "${d.field}" -> "${d.received}"`);
+          console.log(`      ${impactTag} RENAMED: "${c.red}${d.field}${c.reset}" -> "${c.green}${d.received}${c.reset}"`);
           break;
       }
     }
@@ -873,7 +899,7 @@ async function cmdDemoHeal(args: string[]) {
 
   // Attempt LLM healing if available
   if (llm && llm.isAvailable()) {
-    console.log(`      LLM available (${llm.name}). Attempting self-healing...`);
+    info(`LLM available (${c.bold}${llm.name}${c.reset}). Attempting self-healing...`);
     const { SelfHealer: SH } = await import("./runtime/self-healer");
     const healer = new SH({ llm, evidence });
     const healResult = await healer.heal(
@@ -883,25 +909,28 @@ async function cmdDemoHeal(args: string[]) {
       v2Body,
     );
 
-    console.log(`      Healing ${healResult.success ? "SUCCEEDED" : "FAILED"} (${healResult.durationMs}ms)`);
-    console.log(`      Explanation: ${healResult.explanation}`);
+    if (healResult.success) {
+      success(`Healing ${c.bold}SUCCEEDED${c.reset} ${c.dim}(${healResult.durationMs}ms)${c.reset}`);
+    } else {
+      fail(`Healing ${c.bold}FAILED${c.reset} ${c.dim}(${healResult.durationMs}ms)${c.reset}`);
+    }
+    keyValue("    explanation", healResult.explanation);
     if (healResult.fieldMapping) {
-      console.log(`      Field mapping:`);
+      console.log(`    ${c.bold}Field mapping:${c.reset}`);
       for (const [from, to] of Object.entries(healResult.fieldMapping)) {
-        console.log(`        ${from} -> ${to || "(removed)"}`);
+        console.log(`      ${c.red}${from}${c.reset} ${c.dim}->${c.reset} ${c.green}${to || "(removed)"}${c.reset}`);
       }
     }
     console.log("");
   } else {
-    console.log(`      No LLM available. Showing divergence report only.`);
-    console.log(`      To enable self-healing, set ANTHROPIC_API_KEY or OPENAI_API_KEY.`);
+    warn("No LLM available. Showing divergence report only.");
+    info("To enable self-healing, set ANTHROPIC_API_KEY or OPENAI_API_KEY.");
     console.log("");
 
-    // Show what the mapping would look like
-    console.log(`      Suggested mapping (deterministic):`);
-    console.log(`        price    -> price_cents  (renamed + unit change)`);
-    console.log(`        in_stock -> available    (renamed)`);
-    console.log(`        (new)    <- currency     (added field)`);
+    console.log(`    ${c.bold}Suggested mapping (deterministic):${c.reset}`);
+    console.log(`      ${c.red}price${c.reset}    -> ${c.green}price_cents${c.reset}  ${c.dim}(renamed + unit change)${c.reset}`);
+    console.log(`      ${c.red}in_stock${c.reset} -> ${c.green}available${c.reset}    ${c.dim}(renamed)${c.reset}`);
+    console.log(`      ${c.dim}(new)${c.reset}    <- ${c.green}currency${c.reset}     ${c.dim}(added field)${c.reset}`);
     console.log("");
   }
 
@@ -919,13 +948,13 @@ async function cmdDemoHeal(args: string[]) {
   });
 
   // Summary
-  console.log(`${"=".repeat(60)}`);
-  console.log(`  DEMO COMPLETE`);
-  console.log(`  Divergences detected: ${divergence.divergences.length}`);
-  console.log(`  High impact: ${divergence.divergences.filter((d) => d.impact === "high").length}`);
-  console.log(`  Low impact:  ${divergence.divergences.filter((d) => d.impact === "low").length}`);
-  console.log(`  Evidence recorded in: ${dataDir}/evidence.db`);
-  console.log(`${"=".repeat(60)}\n`);
+  console.log(`  ${c.brightCyan}${c.bold}${"=".repeat(52)}${c.reset}`);
+  console.log(`  ${c.bold}  DEMO COMPLETE${c.reset}`);
+  keyValue("    divergences", `${divergence.divergences.length}`);
+  keyValue("    high impact", `${c.red}${divergence.divergences.filter((d) => d.impact === "high").length}${c.reset}`);
+  keyValue("    low impact", `${c.yellow}${divergence.divergences.filter((d) => d.impact === "low").length}${c.reset}`);
+  keyValue("    evidence", `${dataDir}/evidence.db`);
+  console.log(`  ${c.brightCyan}${c.bold}${"=".repeat(52)}${c.reset}\n`);
 
   // Cleanup
   mock.stop();
@@ -934,6 +963,6 @@ async function cmdDemoHeal(args: string[]) {
 
 // ── Entry point ──
 main().catch((err) => {
-  console.error(err.message);
+  fail(err.message);
   process.exit(1);
 });
