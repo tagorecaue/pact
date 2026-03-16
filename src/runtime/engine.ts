@@ -7,6 +7,8 @@ import { SelfHealer, applyFieldMapping } from "./self-healer";
 import { PrimitiveRegistry } from "./primitives/index";
 import { ConnectorRegistry, type LoadedConnector as LoadedConnectorDef, type ConnectorOperation } from "./connector";
 import { resolveEnv } from "./env";
+import { AgreementStore } from "./agreement-store";
+import { NegotiationEngine, type FieldMapping } from "./negotiation";
 import type {
   FlowExpr,
   StepNode,
@@ -52,6 +54,8 @@ export class ExecutionEngine {
   private selfHealer: SelfHealer | null;
   private primitives: PrimitiveRegistry;
   private connectorRegistry: ConnectorRegistry;
+  private agreementStore: AgreementStore | null;
+  private negotiationEngine: NegotiationEngine | null;
   // Store last known schema per exchange target for divergence detection
   private schemaCache: Map<string, Record<string, string>> = new Map();
   // Store last successful response per exchange target
@@ -60,7 +64,14 @@ export class ExecutionEngine {
   public lastDivergence: DivergenceReport | null = null;
   public lastHealResult: import("./self-healer").HealResult | null = null;
 
-  constructor(evidence: EvidenceStore, httpClient?: HttpClient, llm?: LlmProvider, connectorRegistry?: ConnectorRegistry) {
+  constructor(
+    evidence: EvidenceStore,
+    httpClient?: HttpClient,
+    llm?: LlmProvider,
+    connectorRegistry?: ConnectorRegistry,
+    agreementStore?: AgreementStore,
+    negotiationEngine?: NegotiationEngine,
+  ) {
     this.evidence = evidence;
     this.httpClient = httpClient ?? new HttpClient();
     this.llm = llm ?? null;
@@ -69,6 +80,8 @@ export class ExecutionEngine {
       : null;
     this.primitives = new PrimitiveRegistry({ httpClient: this.httpClient });
     this.connectorRegistry = connectorRegistry ?? new ConnectorRegistry();
+    this.agreementStore = agreementStore ?? null;
+    this.negotiationEngine = negotiationEngine ?? null;
   }
 
   async execute(
@@ -458,17 +471,26 @@ export class ExecutionEngine {
       payload[field] = ctx.get(field) ?? field;
     }
 
-    // Try to resolve via ConnectorRegistry first
+    // ── Resolution chain ──
+    // 1. Try ConnectorRegistry (local connectors)
+    // 2. Try AgreementStore (negotiated agreements)
+    // 3. Try raw HTTP with URL inference
+    // 4. Mock fallback
+
     const connectorResolution = this.connectorRegistry.resolve(node.target);
+    const agreementResolution = !connectorResolution && this.agreementStore
+      ? this.agreementStore.resolveOperation(node.target)
+      : null;
 
     // Resolve target URL
     const baseUrl = ctx.get("_base_url") as string | undefined;
     let targetUrl: string | null = null;
     let method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH" = "POST";
     let headers: Record<string, string> = {};
+    let agreementMappings: FieldMapping[] | null = null;
 
     if (connectorResolution) {
-      // Connector found — build URL from connector baseUrl + operation path
+      // Step 1: Connector found — build URL from connector baseUrl + operation path
       const { connector, operation } = connectorResolution;
       targetUrl = connector.baseUrl + operation.path;
       method = (operation.method as typeof method) ?? "POST";
@@ -484,15 +506,20 @@ export class ExecutionEngine {
           headers["Authorization"] = `Basic ${authEnvValue}`;
         }
       }
+    } else if (agreementResolution) {
+      // Step 2: Agreement found — use compiled endpoint
+      const { agreement, endpoint, mappings } = agreementResolution;
+      agreementMappings = mappings;
+
+      // Build full URL from agreement's remote + endpoint path
+      const remoteBase = agreement.parties.remote.replace(/\/$/, "");
+      targetUrl = endpoint.startsWith("http") ? endpoint : `${remoteBase}${endpoint}`;
     } else if (node.target.startsWith("http://") || node.target.startsWith("https://")) {
       targetUrl = node.target;
     } else if (node.target.includes("/")) {
-      // Target has path segments (e.g., httpbin.org/get) — treat as full host+path
-      // Use http:// for localhost targets, https:// for everything else
       const protocol = node.target.startsWith("localhost") || node.target.startsWith("127.0.0.1") ? "http" : "https";
       targetUrl = `${protocol}://${node.target}`;
     } else if (baseUrl) {
-      // Dotted target without slash — convert dots to path segments
       targetUrl = `${baseUrl}/${node.target.replace(/\./g, "/")}`;
     }
 
@@ -501,11 +528,17 @@ export class ExecutionEngine {
     if (targetUrl) {
       // Real HTTP exchange
       try {
+        // Apply outbound mappings if using agreement resolution
+        let sendPayload = payload;
+        if (agreementMappings && agreementMappings.length > 0) {
+          sendPayload = applyAgreementMappings(payload, agreementMappings, "outbound");
+        }
+
         const response = await this.httpClient.request({
           method,
           url: targetUrl,
           headers: Object.keys(headers).length > 0 ? headers : undefined,
-          body: method !== "GET" ? payload : undefined,
+          body: method !== "GET" ? sendPayload : undefined,
           timeout: 30_000,
         });
 
@@ -513,9 +546,10 @@ export class ExecutionEngine {
           target: node.target,
           url: targetUrl,
           status: response.status,
-          sent: payload,
+          sent: sendPayload,
           response: response.body,
           durationMs: response.durationMs,
+          resolvedVia: agreementResolution ? "agreement" : connectorResolution ? "connector" : "url",
         };
 
         // Set received fields from response body
@@ -525,6 +559,11 @@ export class ExecutionEngine {
           // If response is an array, use the first item for schema detection
           if (Array.isArray(response.body) && response.body.length > 0) {
             body = response.body[0] as Record<string, unknown>;
+          }
+
+          // Apply inbound mappings from agreement (rename remote fields back to local)
+          if (agreementMappings && agreementMappings.length > 0) {
+            body = applyAgreementMappings(body, agreementMappings, "inbound");
           }
 
           // ── Phase 5: Divergence detection ──
@@ -551,6 +590,44 @@ export class ExecutionEngine {
               timestamp: new Date().toISOString(),
               status: divergence.hasHighImpact ? "failed" : "success",
             });
+
+            // ── Auto-renegotiation: if resolved via agreement and divergence detected ──
+            if (agreementResolution && divergence.hasHighImpact && this.negotiationEngine && this.agreementStore) {
+              const changes = divergence.divergences
+                .filter((d) => d.type === "field_removed" || d.type === "field_renamed")
+                .map((d) => ({
+                  field: d.field,
+                  oldValue: d.field,
+                  newValue: d.received ?? "",
+                }));
+
+              if (changes.length > 0) {
+                try {
+                  const renegotiated = await this.negotiationEngine.renegotiate(
+                    agreementResolution.agreement,
+                    changes,
+                  );
+                  this.agreementStore.save(renegotiated);
+
+                  // Apply new mappings to current response
+                  body = applyAgreementMappings(body, renegotiated.mappings, "inbound");
+
+                  this.evidence.record({
+                    contract_id: contractId,
+                    request_id: requestId,
+                    step_name: `auto-renegotiate:${node.target}`,
+                    action: "auto-renegotiated",
+                    input: JSON.stringify({ changes }),
+                    output: JSON.stringify({ newVersion: renegotiated.version }),
+                    duration_ms: 0,
+                    timestamp: new Date().toISOString(),
+                    status: "success",
+                  });
+                } catch {
+                  // Renegotiation failed — continue with partial data
+                }
+              }
+            }
 
             // If high impact divergence and LLM is available, attempt self-healing
             if (divergence.hasHighImpact && this.selfHealer) {
@@ -824,6 +901,66 @@ export class PactRuntimeError extends Error {
     super(message);
     this.name = "PactRuntimeError";
   }
+}
+
+// ── Agreement field mapping ──
+
+/**
+ * Apply field mappings from a negotiated agreement.
+ * For outbound: renames local field names to remote field names in the payload.
+ * For inbound: renames remote field names back to local field names in the response.
+ * Also applies transforms if specified (e.g., "multiply_100").
+ */
+export function applyAgreementMappings(
+  data: Record<string, unknown>,
+  mappings: FieldMapping[],
+  direction: "outbound" | "inbound",
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...data };
+
+  for (const mapping of mappings) {
+    if (direction === "outbound" && mapping.direction === "outbound") {
+      // Rename local -> remote in outbound payload
+      if (mapping.localField !== mapping.remoteField && mapping.localField in result) {
+        result[mapping.remoteField] = result[mapping.localField];
+        delete result[mapping.localField];
+      }
+      // Apply outbound transforms
+      if (mapping.transform && mapping.remoteField in result) {
+        result[mapping.remoteField] = applyTransform(result[mapping.remoteField], mapping.transform);
+      }
+    } else if (direction === "inbound") {
+      // For inbound, check both inbound and outbound mappings (reverse the outbound ones)
+      if (mapping.direction === "inbound") {
+        // Inbound mapping: remoteField in response -> localField
+        if (mapping.remoteField !== mapping.localField && mapping.remoteField in result) {
+          result[mapping.localField] = result[mapping.remoteField];
+        }
+      } else if (mapping.direction === "outbound") {
+        // Reverse outbound mapping: remoteField in response -> localField
+        if (mapping.remoteField !== mapping.localField && mapping.remoteField in result) {
+          result[mapping.localField] = result[mapping.remoteField];
+        }
+      }
+      // Apply inbound transforms
+      if (mapping.transform && mapping.localField in result) {
+        result[mapping.localField] = applyTransform(result[mapping.localField], mapping.transform);
+      }
+    }
+  }
+
+  return result;
+}
+
+function applyTransform(value: unknown, transform: string): unknown {
+  if (transform === "multiply_100" && typeof value === "number") {
+    return value * 100;
+  }
+  if (transform === "divide_100" && typeof value === "number") {
+    return value / 100;
+  }
+  // "rename:" transforms are handled by the mapping itself, not here
+  return value;
 }
 
 // ── String helpers ──

@@ -2,6 +2,10 @@
 
 > An AI-native protocol that turns what you want into what machines do — with proof at every step.
 
+<p align="center">
+  <img src="demo.gif" alt="Pact CLI Demo" width="880" />
+</p>
+
 ## What is Pact?
 
 Pact is an AI-native protocol for turning human intent into machine execution — with zero ambiguity.
@@ -70,13 +74,13 @@ $ pact run customer.create.pact --input '{"email":"a@b.com","name":"Ana"}'
 
 ## Current Status
 
-238 tests. Zero external dependencies. 25 connectors. TypeScript + Bun.
+268 tests. Zero external dependencies. 25 connectors. TypeScript + Bun.
 
 | What | Status |
 |------|--------|
 | Spec v0.1 (dialect, interrogation, connectors, runtime) | Complete |
 | Parser (lexer, AST, 15 section types) | Complete |
-| CLI (`pact parse`, `inspect`, `run`, `new`, `serve`, `connectors`, `demo-heal`) | Complete |
+| CLI (`parse`, `inspect`, `run`, `new`, `serve`, `connectors`, `negotiate`, `agreements`, `health`, `demo-heal`, `demo-negotiate`) | Complete |
 | Runtime (execution engine, evidence store, data store) | Complete |
 | HTTP Gateway (`pact serve` with auto-routing from `@T`) | Complete |
 | HTTP Exchange (`<>` makes real outbound HTTP calls) | Complete |
@@ -85,7 +89,7 @@ $ pact run customer.create.pact --input '{"email":"a@b.com","name":"Ana"}'
 | Translator (`pact new` — natural language to .pact contracts) | Complete |
 | Connectors (25 community connectors + primitive system) | Complete |
 | Self-Healing (schema divergence detection + auto-adaptation) | Complete |
-| Server-to-Server Negotiation (`@N`) | Planned |
+| Server-to-Server Negotiation (`@N`, agreements, health checks) | Complete |
 
 ## Getting Started
 
@@ -126,8 +130,22 @@ pact new  # interactive mode (prompts for description)
 # Start HTTP server (routes from @T triggers)
 pact serve contracts/
 
+# Negotiate with a remote Pact server
+pact negotiate http://remote-server:3000
+
+# List or inspect agreements
+pact agreements
+pact agreements http://remote-server:3000
+
+# Check partner health
+pact health
+pact health remote-server:3000
+
 # Run the self-healing demo
 pact demo-heal
+
+# Run the server-to-server negotiation demo
+pact demo-negotiate
 ```
 
 ### HTTP Server
@@ -199,6 +217,43 @@ This starts a mock server, executes a contract against schema v1, switches to v2
       [low]  ADDED:   "currency" (type: string)
       [low]  ADDED:   "available" (type: boolean)
 ```
+
+### Server-to-Server Negotiation
+
+Pact servers discover each other, negotiate field mappings, and establish agreements — automatically. When an API changes, agreements are renegotiated without human intervention.
+
+**How it works:**
+
+1. **Discover** — Server A fetches Server B's manifest (`GET /.pact/manifest`) to learn what it offers and accepts.
+2. **Negotiate** — Server A proposes needs based on its `@N accepts`, Server B matches against its `@N offers`, and field mappings are generated (deterministic or LLM-assisted).
+3. **Compile** — An agreement is established with compiled endpoints and field mappings (e.g., `product_id` <-> `sku`).
+4. **Execute** — The runtime resolves exchanges via agreements: outbound fields are renamed to match the remote API, inbound responses are mapped back to local names.
+5. **Renegotiate** — If the remote API changes (detected via divergence), the agreement is automatically renegotiated and updated.
+
+```bash
+# Run the full negotiation demo (two servers, bilateral discovery, renegotiation)
+pact demo-negotiate
+
+# Negotiate with a specific remote server
+pact negotiate http://server-b.example.com:3000
+
+# List all active agreements
+pact agreements
+
+# Check partner health (manifest changes, reachability)
+pact health
+```
+
+**Health checks** monitor partners for changes:
+
+```
+Partner Health Check:
+  ✓ server-b.example.com — healthy (checked 0s ago)
+  ! server-c.example.com — changed (inventory: no longer offered)
+  ✗ server-d.example.com — unreachable
+```
+
+Agreements are stored in `data/agreements/<hostname>/` with full version history. The `pact agreements` command shows details including field mappings, trust levels, and compiled endpoints.
 
 ### Connectors
 
@@ -313,7 +368,7 @@ Or configure in `pact.config.json`:
 ### Running Tests
 
 ```bash
-bun test              # Run all 238 tests
+bun test              # Run all 268 tests
 bun test tests/lexer  # Run specific test file
 ```
 
@@ -347,6 +402,9 @@ src/
     connector.ts            # Connector registry and resolver
     divergence.ts           # Schema divergence detector
     self-healer.ts          # LLM-based self-healing
+    negotiation.ts          # Negotiation engine (discover, negotiate, renegotiate)
+    agreement-store.ts      # Agreement persistence (filesystem-backed)
+    health-check.ts         # Partner health monitoring
     env.ts                  # .env file loader and env: resolver
     mock-server.ts          # Mock API for demos
     primitives/
@@ -360,13 +418,15 @@ contracts/                  # Example .pact contracts
   customer.create.pact      # REST API demo
   greeting.reason.pact      # AI reasoning demo
   product-sync.pact         # Self-healing demo
+  demo-store.pact           # Negotiation demo (store server)
+  demo-fulfillment.pact     # Negotiation demo (fulfillment server)
 connectors/
   community/                # 25 community connectors
     telegram.pact           # Telegram Bot API
     stripe.pact             # Stripe Payments
     github.pact             # GitHub API
     ...                     # 22 more
-tests/                      # 238 tests across 13 files
+tests/                      # 268 tests across 15 files
 spec/                       # Pact spec v0.1
 ```
 
@@ -384,6 +444,7 @@ Human Intent → Interrogation → Pact Contract → Execution → Evidence
 4. The Runtime executes the contract deterministically (or via AI reasoning).
 5. Every step produces Evidence — an auditable trail of what happened.
 6. If an external API changes, Pact detects the divergence and self-heals.
+7. Servers negotiate agreements, map fields automatically, and renegotiate when APIs evolve.
 
 ## Why Not n8n / Zapier / Make?
 

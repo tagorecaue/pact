@@ -12,6 +12,7 @@ import { Translator } from "./runtime/translator";
 import { ConnectorRegistry } from "./runtime/connector";
 import { NegotiationEngine, type Manifest } from "./runtime/negotiation";
 import { AgreementStore } from "./runtime/agreement-store";
+import { checkPartnerHealth } from "./runtime/health-check";
 import { loadEnvFile } from "./runtime/env";
 import {
   c,
@@ -45,6 +46,7 @@ function printUsage(): void {
   console.log(`    ${c.cyan}pact connectors${c.reset}                           List available connectors`);
   console.log(`    ${c.cyan}pact negotiate${c.reset} <remote-url>                Negotiate with remote server`);
   console.log(`    ${c.cyan}pact agreements${c.reset} [remote-url]               List or show agreements`);
+  console.log(`    ${c.cyan}pact health${c.reset} [remote-url]                  Check partner health`);
   console.log(`    ${c.cyan}pact demo-negotiate${c.reset} [--port-a 3010]         Run server negotiation demo`);
   console.log(`    ${c.cyan}pact demo-heal${c.reset} [--port 4000]              Run self-healing demo`);
 
@@ -96,6 +98,9 @@ async function main() {
       break;
     case "agreements":
       await cmdAgreements(args.slice(1));
+      break;
+    case "health":
+      await cmdHealth(args.slice(1));
       break;
     case "demo-negotiate":
       await cmdDemoNegotiate(args.slice(1));
@@ -1178,6 +1183,71 @@ async function cmdAgreements(args: string[]) {
       console.log("");
     }
   }
+}
+
+// ── pact health ──
+
+async function cmdHealth(args: string[]) {
+  const specificRemote = args.find((a) => !a.startsWith("--"));
+  const dataDir = args.find((a, i) => args[i - 1] === "--data-dir") ?? "data";
+
+  const store = new AgreementStore(dataDir);
+  const httpClient = new HttpClient({ maxRetries: 0, retryDelayMs: 0 });
+  const agreements = store.loadAll();
+
+  if (agreements.length === 0) {
+    printBanner();
+    info("No agreements found.");
+    info("Run: pact negotiate <remote-url>");
+    console.log("");
+    return;
+  }
+
+  // Filter to specific remote if provided
+  const targets = specificRemote
+    ? agreements.filter((a) => a.parties.remote.includes(specificRemote))
+    : agreements;
+
+  if (targets.length === 0) {
+    fail(`No agreements found for ${specificRemote}`);
+    process.exit(1);
+  }
+
+  header("Partner Health Check");
+
+  for (const agreement of targets) {
+    const remoteUrl = agreement.parties.remote;
+    const result = await checkPartnerHealth(remoteUrl, agreement, httpClient);
+
+    const remoteDisplay = remoteUrl.replace(/^https?:\/\//, "");
+
+    switch (result.status) {
+      case "healthy":
+        console.log(`  ${c.green}${c.bold}\u2713${c.reset} ${remoteDisplay} ${c.dim}\u2014 healthy (checked ${timeSince(result.checkedAt)} ago)${c.reset}`);
+        break;
+      case "changed":
+        console.log(`  ${c.yellow}${c.bold}!${c.reset} ${remoteDisplay} ${c.dim}\u2014 changed${c.reset}`);
+        if (result.changes) {
+          for (const change of result.changes) {
+            console.log(`    ${c.yellow}\u2192${c.reset} ${change}`);
+          }
+        }
+        break;
+      case "unreachable":
+        console.log(`  ${c.red}${c.bold}\u2717${c.reset} ${remoteDisplay} ${c.dim}\u2014 unreachable${c.reset}`);
+        break;
+    }
+  }
+
+  console.log("");
+}
+
+function timeSince(isoDate: string): string {
+  const diff = Date.now() - new Date(isoDate).getTime();
+  if (diff < 1000) return "0s";
+  if (diff < 60_000) return `${Math.floor(diff / 1000)}s`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
+  return `${Math.floor(diff / 3_600_000)}h`;
 }
 
 // ── pact demo-negotiate ──

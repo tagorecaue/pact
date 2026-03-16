@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync, readFileSync, writeFileSync, readdirSync, rmSync } from "fs";
 import { join } from "path";
-import type { Agreement } from "./negotiation";
+import type { Agreement, FieldMapping } from "./negotiation";
 
 /**
  * Filesystem-backed persistence for negotiation agreements.
@@ -116,6 +116,41 @@ export class AgreementStore {
     if (existsSync(hostDir)) {
       rmSync(hostDir, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Resolve an operation name to an agreement, endpoint, and mappings.
+   * Searches all active agreements for a compiledEndpoint matching the operation.
+   * e.g., "inventory.check" finds the agreement with compiledEndpoints["inventory.check"]
+   */
+  resolveOperation(operationName: string): { agreement: Agreement; endpoint: string; mappings: FieldMapping[] } | null {
+    const agreements = this.loadAll();
+
+    for (const agreement of agreements) {
+      if (agreement.status !== "active") continue;
+
+      // Exact match on compiled endpoints
+      if (agreement.compiledEndpoints[operationName]) {
+        const endpoint = agreement.compiledEndpoints[operationName]!;
+        const mappings = agreement.mappings.filter(
+          (m) => m.operation === operationName,
+        );
+        return { agreement, endpoint, mappings };
+      }
+
+      // Try matching with the dot-separated operation name against endpoint keys
+      // e.g., "inventory" matches "inventory" or "inventory.check"
+      for (const [key, endpoint] of Object.entries(agreement.compiledEndpoints)) {
+        if (key === operationName || operationName.startsWith(`${key}.`) || key.startsWith(`${operationName}.`)) {
+          const mappings = agreement.mappings.filter(
+            (m) => m.operation === key || m.operation === operationName,
+          );
+          return { agreement, endpoint, mappings };
+        }
+      }
+    }
+
+    return null;
   }
 
   // ── Private helpers ──

@@ -35,9 +35,16 @@ export class PactServer {
     this.evidence = new EvidenceStore(this.options.dataDir);
     this.store = new DataStore(this.options.dataDir);
     this.httpClient = new HttpClient();
-    this.engine = new ExecutionEngine(this.evidence);
     this.negotiationEngine = new NegotiationEngine(null, this.evidence);
     this.agreementStore = new AgreementStore(this.options.dataDir);
+    this.engine = new ExecutionEngine(
+      this.evidence,
+      undefined,             // httpClient — use default
+      undefined,             // llm — none for server mode
+      undefined,             // connectorRegistry — use default
+      this.agreementStore,
+      this.negotiationEngine,
+    );
   }
 
   start(): Server {
