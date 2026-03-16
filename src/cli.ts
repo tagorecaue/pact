@@ -10,6 +10,7 @@ import { detectDivergence, buildSchemaMap } from "./runtime/divergence";
 import { HttpClient } from "./runtime/http-client";
 import { Translator } from "./runtime/translator";
 import { ConnectorRegistry } from "./runtime/connector";
+import { loadEnvFile } from "./runtime/env";
 import type { LoadedContract } from "./runtime/registry";
 
 const USAGE = `
@@ -37,6 +38,8 @@ Options:
 `.trim();
 
 async function main() {
+  loadEnvFile();
+
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {

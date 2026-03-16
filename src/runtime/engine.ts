@@ -6,6 +6,7 @@ import { detectDivergence, buildSchemaMap, type DivergenceReport } from "./diver
 import { SelfHealer, applyFieldMapping } from "./self-healer";
 import { PrimitiveRegistry } from "./primitives/index";
 import { ConnectorRegistry, type LoadedConnector as LoadedConnectorDef, type ConnectorOperation } from "./connector";
+import { resolveEnv } from "./env";
 import type {
   FlowExpr,
   StepNode,
@@ -473,8 +474,8 @@ export class ExecutionEngine {
       method = (operation.method as typeof method) ?? "POST";
 
       // Add auth headers based on connector auth type
-      const authEnvValue = process.env[connector.authEnv] ?? "";
-      if (authEnvValue) {
+      const authEnvValue = resolveEnv(`env:${connector.authEnv}`);
+      if (authEnvValue && !authEnvValue.startsWith("env:")) {
         if (connector.authType === "bearer_token") {
           headers["Authorization"] = `Bearer ${authEnvValue}`;
         } else if (connector.authType === "api_key") {

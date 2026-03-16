@@ -1,4 +1,5 @@
 import { HttpClient, type HttpRequestSpec, type HttpResponse } from "../http-client";
+import { resolveEnv } from "../env";
 
 export interface HttpPrimitiveResult {
   status: number;
@@ -9,12 +10,12 @@ export interface HttpPrimitiveResult {
 
 /**
  * Resolves env:VAR_NAME references in parameter values to process.env.VAR_NAME.
+ * Uses resolveEnv() from env.ts for env: prefix resolution.
  */
 function resolveEnvRefs(value: unknown): unknown {
   if (typeof value === "string") {
     if (value.startsWith("env:")) {
-      const envVar = value.slice(4);
-      return process.env[envVar] ?? "";
+      return resolveEnv(value);
     }
     // Also handle ${env:VAR} patterns within strings
     return value.replace(/\$\{env:([^}]+)\}/g, (_, varName) => {

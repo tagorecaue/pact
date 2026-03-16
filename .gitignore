@@ -5,3 +5,4 @@ vendor/
 models/
 data/
 pact.config.json
+.env
