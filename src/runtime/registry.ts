@@ -12,6 +12,7 @@ import type {
   FallbacksSection,
   DependenciesSection,
   EvidenceSection,
+  NegotiateSection,
 } from "../parser/ast";
 
 export interface LoadedContract {
@@ -30,6 +31,7 @@ export interface LoadedContract {
     fallbacks?: FallbacksSection;
     dependencies?: DependenciesSection;
     evidence?: EvidenceSection;
+    negotiate?: NegotiateSection;
   };
 }
 
@@ -151,6 +153,9 @@ function buildSections(
         break;
       case "EvidenceSection":
         sections.evidence = s;
+        break;
+      case "NegotiateSection":
+        sections.negotiate = s;
         break;
     }
   }

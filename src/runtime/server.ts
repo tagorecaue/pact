@@ -4,6 +4,8 @@ import { EvidenceStore } from "./evidence";
 import { DataStore } from "./store";
 import { ExecutionEngine } from "./engine";
 import { HttpClient } from "./http-client";
+import { NegotiationEngine, type NegotiationProposal, type Manifest } from "./negotiation";
+import { AgreementStore } from "./agreement-store";
 
 export interface PactServerOptions {
   contractsDir: string;
@@ -17,6 +19,8 @@ export class PactServer {
   private store: DataStore;
   private engine: ExecutionEngine;
   private httpClient: HttpClient;
+  private negotiationEngine: NegotiationEngine;
+  private agreementStore: AgreementStore;
   private server: Server | null = null;
   private options: Required<PactServerOptions>;
 
@@ -32,6 +36,8 @@ export class PactServer {
     this.store = new DataStore(this.options.dataDir);
     this.httpClient = new HttpClient();
     this.engine = new ExecutionEngine(this.evidence);
+    this.negotiationEngine = new NegotiationEngine(null, this.evidence);
+    this.agreementStore = new AgreementStore(this.options.dataDir);
   }
 
   start(): Server {
@@ -78,6 +84,22 @@ export class PactServer {
     this.store.close();
   }
 
+  getRegistry(): ContractRegistry {
+    return this.registry;
+  }
+
+  getEvidence(): EvidenceStore {
+    return this.evidence;
+  }
+
+  getNegotiationEngine(): NegotiationEngine {
+    return this.negotiationEngine;
+  }
+
+  getAgreementStore(): AgreementStore {
+    return this.agreementStore;
+  }
+
   private getRoutes(contract: LoadedContract): string[] {
     const routes: string[] = [];
     if (contract.sections.triggers) {
@@ -109,6 +131,70 @@ export class PactServer {
         routes: this.getRoutes(c),
       }));
       return Response.json({ contracts });
+    }
+
+    // ── Negotiation endpoints ──
+
+    // GET /.pact/manifest — expose capabilities
+    if (path === "/.pact/manifest" && method === "GET") {
+      const serverUrl = `http://localhost:${this.options.port}`;
+      const manifest = this.negotiationEngine.buildManifest(
+        this.registry.getAll(),
+        serverUrl,
+      );
+      return Response.json(manifest);
+    }
+
+    // POST /.pact/negotiate — handle incoming negotiation proposal
+    if (path === "/.pact/negotiate" && method === "POST") {
+      try {
+        const proposal = (await req.json()) as NegotiationProposal;
+        const response = await this.negotiationEngine.handleProposal(
+          proposal,
+          this.registry.getAll(),
+        );
+        return Response.json(response);
+      } catch (err: any) {
+        return Response.json(
+          { error: "Invalid negotiation proposal", detail: err.message },
+          { status: 400 },
+        );
+      }
+    }
+
+    // POST /.pact/renegotiate — handle renegotiation request
+    if (path === "/.pact/renegotiate" && method === "POST") {
+      try {
+        const body = (await req.json()) as {
+          agreementId: string;
+          changes: { field: string; oldValue: string; newValue: string }[];
+        };
+
+        // Find existing agreement
+        const agreements = this.agreementStore.loadAll();
+        const existing = agreements.find((a) => a.id === body.agreementId);
+        if (!existing) {
+          return Response.json(
+            { error: "Agreement not found", agreementId: body.agreementId },
+            { status: 404 },
+          );
+        }
+
+        const updated = await this.negotiationEngine.renegotiate(existing, body.changes);
+        this.agreementStore.save(updated);
+        return Response.json(updated);
+      } catch (err: any) {
+        return Response.json(
+          { error: "Renegotiation failed", detail: err.message },
+          { status: 400 },
+        );
+      }
+    }
+
+    // GET /.pact/agreements — list all active agreements
+    if (path === "/.pact/agreements" && method === "GET") {
+      const agreements = this.agreementStore.loadAll();
+      return Response.json({ agreements });
     }
 
     // Resolve contract by route

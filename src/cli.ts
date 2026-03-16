@@ -10,6 +10,8 @@ import { detectDivergence, buildSchemaMap } from "./runtime/divergence";
 import { HttpClient } from "./runtime/http-client";
 import { Translator } from "./runtime/translator";
 import { ConnectorRegistry } from "./runtime/connector";
+import { NegotiationEngine, type Manifest } from "./runtime/negotiation";
+import { AgreementStore } from "./runtime/agreement-store";
 import { loadEnvFile } from "./runtime/env";
 import {
   c,
@@ -41,6 +43,9 @@ function printUsage(): void {
   console.log(`    ${c.cyan}pact new${c.reset} [--desc "<description>"]         Generate contract from natural language`);
   console.log(`    ${c.cyan}pact serve${c.reset} <contracts-dir>                Start HTTP server`);
   console.log(`    ${c.cyan}pact connectors${c.reset}                           List available connectors`);
+  console.log(`    ${c.cyan}pact negotiate${c.reset} <remote-url>                Negotiate with remote server`);
+  console.log(`    ${c.cyan}pact agreements${c.reset} [remote-url]               List or show agreements`);
+  console.log(`    ${c.cyan}pact demo-negotiate${c.reset} [--port-a 3010]         Run server negotiation demo`);
   console.log(`    ${c.cyan}pact demo-heal${c.reset} [--port 4000]              Run self-healing demo`);
 
   console.log(`\n  ${c.bold}Options:${c.reset}\n`);
@@ -85,6 +90,15 @@ async function main() {
       break;
     case "connectors":
       await cmdConnectors(args.slice(1));
+      break;
+    case "negotiate":
+      await cmdNegotiate(args.slice(1));
+      break;
+    case "agreements":
+      await cmdAgreements(args.slice(1));
+      break;
+    case "demo-negotiate":
+      await cmdDemoNegotiate(args.slice(1));
       break;
     case "demo-heal":
       await cmdDemoHeal(args.slice(1));
@@ -959,6 +973,436 @@ async function cmdDemoHeal(args: string[]) {
   // Cleanup
   mock.stop();
   evidence.close();
+}
+
+// ── pact negotiate ──
+
+async function cmdNegotiate(args: string[]) {
+  const remoteUrl = args.find((a) => !a.startsWith("--"));
+  if (!remoteUrl) {
+    fail("Usage: pact negotiate <remote-url>");
+    process.exit(1);
+  }
+
+  const contractsDir = args.find((a, i) => args[i - 1] === "--contracts") ?? "contracts";
+  const dataDir = args.find((a, i) => args[i - 1] === "--data-dir") ?? "data";
+
+  printBanner();
+  header("SERVER NEGOTIATION");
+
+  // Load local contracts
+  uiStep(1, 4, "Loading local contracts...");
+  const registry = new ContractRegistry();
+  try {
+    registry.loadDirectory(contractsDir);
+  } catch (err: any) {
+    fail(`Could not load contracts from ${contractsDir}: ${err.message}`);
+    process.exit(1);
+  }
+
+  const contracts = registry.getAll();
+  const negotiable = contracts.filter((c) =>
+    c.ast.sections.some((s) => s.kind === "NegotiateSection"),
+  );
+
+  if (negotiable.length === 0) {
+    fail("No contracts with @N (negotiate) sections found.");
+    process.exit(1);
+  }
+
+  for (const c of negotiable) {
+    info(`  ${c.name} ${c.dim}${c.version}${c.reset}`);
+  }
+  console.log("");
+
+  // Discover remote
+  uiStep(2, 4, `Discovering remote: ${c.bold}${remoteUrl}${c.reset}`);
+
+  let remoteManifest: Manifest;
+  try {
+    const manifestUrl = remoteUrl.endsWith("/")
+      ? `${remoteUrl}.pact/manifest`
+      : `${remoteUrl}/.pact/manifest`;
+    const res = await fetch(manifestUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    remoteManifest = (await res.json()) as Manifest;
+  } catch (err: any) {
+    fail(`Could not fetch manifest from ${remoteUrl}: ${err.message}`);
+    process.exit(1);
+  }
+
+  keyValue("    server", remoteManifest.server);
+  keyValue("    contracts", `${remoteManifest.contracts.length}`);
+  for (const rc of remoteManifest.contracts) {
+    info(`  ${rc.name} ${c.dim}offers: ${rc.offers.join(", ")} | accepts: ${rc.accepts.join(", ")}${c.reset}`);
+  }
+  console.log("");
+
+  // Negotiate
+  uiStep(3, 4, "Running negotiation...");
+  const evidence = new EvidenceStore(dataDir);
+  const negotiationEngine = new NegotiationEngine(createDefaultProvider(), evidence);
+  const agreementStore = new AgreementStore(dataDir);
+
+  let agreementCount = 0;
+  for (const contract of negotiable) {
+    try {
+      const agreement = await negotiationEngine.negotiate(contract, remoteManifest, remoteUrl);
+      agreementStore.save(agreement);
+      agreementCount++;
+
+      success(`Agreement established: ${c.bold}${contract.name}${c.reset} <-> ${c.bold}${agreement.parties.remote}${c.reset}`);
+      keyValue("      id", agreement.id);
+      keyValue("      mappings", `${agreement.mappings.length}`);
+      keyValue("      endpoints", Object.keys(agreement.compiledEndpoints).join(", ") || "(none)");
+
+      if (agreement.mappings.length > 0) {
+        console.log(`      ${c.bold}Field mappings:${c.reset}`);
+        for (const m of agreement.mappings) {
+          const dir = m.direction === "outbound" ? "->" : "<-";
+          const xform = m.transform ? ` ${c.dim}(${m.transform})${c.reset}` : "";
+          console.log(`        ${c.cyan}${m.localField}${c.reset} ${dir} ${c.green}${m.remoteField}${c.reset} ${c.dim}[${m.operation}]${c.reset}${xform}`);
+        }
+      }
+
+      if (agreement.trustLevels.locked.length > 0) {
+        console.log(`      ${c.bold}Trust (locked):${c.reset}`);
+        for (const rule of agreement.trustLevels.locked) {
+          console.log(`        ${c.red}!${c.reset} ${rule}`);
+        }
+      }
+    } catch (err: any) {
+      fail(`Negotiation failed for ${contract.name}: ${err.message}`);
+    }
+    console.log("");
+  }
+
+  // Summary
+  uiStep(4, 4, `${c.bold}Complete${c.reset}`);
+  keyValue("    agreements", `${agreementCount}`);
+  console.log("");
+
+  evidence.close();
+}
+
+// ── pact agreements ──
+
+async function cmdAgreements(args: string[]) {
+  const remoteUrl = args.find((a) => !a.startsWith("--"));
+  const dataDir = args.find((a, i) => args[i - 1] === "--data-dir") ?? "data";
+
+  const store = new AgreementStore(dataDir);
+
+  if (remoteUrl) {
+    // Show detailed agreement
+    const agreement = store.load(remoteUrl);
+    if (!agreement) {
+      fail(`No agreement found for ${remoteUrl}`);
+      process.exit(1);
+    }
+
+    header(`Agreement: ${agreement.parties.local} <-> ${agreement.parties.remote}`);
+    keyValue("  id", agreement.id);
+    keyValue("  status", agreement.status === "active" ? `${c.green}${agreement.status}${c.reset}` : `${c.yellow}${agreement.status}${c.reset}`);
+    keyValue("  version", `${agreement.version}`);
+    keyValue("  established", agreement.established);
+    keyValue("  renegotiated", agreement.lastRenegotiated ?? "(never)");
+
+    if (agreement.mappings.length > 0) {
+      section("  Field Mappings");
+      for (const m of agreement.mappings) {
+        const dir = m.direction === "outbound" ? "->" : "<-";
+        const xform = m.transform ? ` ${c.dim}(${m.transform})${c.reset}` : "";
+        console.log(`    ${c.cyan}${m.localField}${c.reset} ${dir} ${c.green}${m.remoteField}${c.reset} ${c.dim}[${m.operation}]${c.reset}${xform}`);
+      }
+    }
+
+    if (Object.keys(agreement.compiledEndpoints).length > 0) {
+      section("  Compiled Endpoints");
+      for (const [name, url] of Object.entries(agreement.compiledEndpoints)) {
+        console.log(`    ${c.cyan}${name}${c.reset}: ${url}`);
+      }
+    }
+
+    section("  Trust Levels");
+    if (agreement.trustLevels.locked.length > 0) {
+      console.log(`    ${c.red}Locked:${c.reset}`);
+      for (const rule of agreement.trustLevels.locked) {
+        console.log(`      ${c.red}!${c.reset} ${rule}`);
+      }
+    }
+    if (agreement.trustLevels.negotiable.length > 0) {
+      console.log(`    ${c.yellow}Negotiable:${c.reset}`);
+      for (const rule of agreement.trustLevels.negotiable) {
+        console.log(`      ${c.yellow}~${c.reset} ${rule}`);
+      }
+    }
+    if (agreement.trustLevels.agreed.length > 0) {
+      console.log(`    ${c.green}Agreed:${c.reset}`);
+      for (const rule of agreement.trustLevels.agreed) {
+        console.log(`      ${c.green}+${c.reset} ${rule}`);
+      }
+    }
+
+    // History
+    const history = store.getHistory(remoteUrl);
+    if (history.length > 0) {
+      section(`  History ${c.dim}(${history.length} previous versions)${c.reset}`);
+      for (const h of history) {
+        console.log(`    v${h.version} ${c.dim}${h.established}${c.reset}`);
+      }
+    }
+
+    console.log("");
+  } else {
+    // List all agreements
+    const agreements = store.loadAll();
+
+    if (agreements.length === 0) {
+      printBanner();
+      info("No agreements found.");
+      info("Run: pact negotiate <remote-url>");
+      console.log("");
+      return;
+    }
+
+    header(`Agreements ${c.dim}(${agreements.length})${c.reset}`);
+
+    for (const a of agreements) {
+      const statusColor = a.status === "active" ? c.green : c.yellow;
+      console.log(`  ${c.bold}${a.parties.local}${c.reset} <-> ${c.bold}${a.parties.remote}${c.reset}`);
+      keyValue("    status", `${statusColor}${a.status}${c.reset}`);
+      keyValue("    version", `${a.version}`);
+      keyValue("    mappings", `${a.mappings.length}`);
+      keyValue("    established", a.established);
+      console.log("");
+    }
+  }
+}
+
+// ── pact demo-negotiate ──
+
+async function cmdDemoNegotiate(args: string[]) {
+  const portAIdx = args.indexOf("--port-a");
+  const portA = portAIdx !== -1 ? parseInt(args[portAIdx + 1]!, 10) : 3010;
+  const portBIdx = args.indexOf("--port-b");
+  const portB = portBIdx !== -1 ? parseInt(args[portBIdx + 1]!, 10) : 3011;
+
+  const { mkdirSync, existsSync, writeFileSync, cpSync, rmSync } = await import("fs");
+  const { join } = await import("path");
+
+  printBanner();
+  header("SERVER-TO-SERVER NEGOTIATION DEMO");
+
+  const TOTAL_STEPS = 8;
+
+  // Prepare isolated directories for each server
+  const tmpBase = join(process.cwd(), "data", "demo-negotiate");
+  const dirA = join(tmpBase, "server-a");
+  const dirB = join(tmpBase, "server-b");
+  const contractsDirA = join(dirA, "contracts");
+  const contractsDirB = join(dirB, "contracts");
+  const dataDirA = join(dirA, "data");
+  const dataDirB = join(dirB, "data");
+
+  // Clean up any previous demo data
+  if (existsSync(tmpBase)) {
+    rmSync(tmpBase, { recursive: true, force: true });
+  }
+
+  mkdirSync(contractsDirA, { recursive: true });
+  mkdirSync(contractsDirB, { recursive: true });
+  mkdirSync(dataDirA, { recursive: true });
+  mkdirSync(dataDirB, { recursive: true });
+
+  // Copy demo contracts
+  const storeContract = join(process.cwd(), "contracts", "demo-store.pact");
+  const fulfillmentContract = join(process.cwd(), "contracts", "demo-fulfillment.pact");
+
+  if (!existsSync(storeContract) || !existsSync(fulfillmentContract)) {
+    fail("Demo contracts not found. Expected contracts/demo-store.pact and contracts/demo-fulfillment.pact");
+    process.exit(1);
+  }
+
+  cpSync(storeContract, join(contractsDirA, "demo-store.pact"));
+  cpSync(fulfillmentContract, join(contractsDirB, "demo-fulfillment.pact"));
+
+  // Step 1: Start Server A (store)
+  uiStep(1, TOTAL_STEPS, `Starting ${c.bold}Server A${c.reset} (store) on port ${c.bold}${portA}${c.reset}`);
+  const serverA = new PactServer({ contractsDir: contractsDirA, port: portA, dataDir: dataDirA });
+  serverA.start();
+  success(`Server A running on http://localhost:${portA}`);
+  console.log("");
+
+  // Step 2: Start Server B (fulfillment)
+  uiStep(2, TOTAL_STEPS, `Starting ${c.bold}Server B${c.reset} (fulfillment) on port ${c.bold}${portB}${c.reset}`);
+  const serverB = new PactServer({ contractsDir: contractsDirB, port: portB, dataDir: dataDirB });
+  serverB.start();
+  success(`Server B running on http://localhost:${portB}`);
+  console.log("");
+
+  // Step 3: Discover Server B from Server A
+  uiStep(3, TOTAL_STEPS, `Server A discovers Server B via ${c.cyan}GET /.pact/manifest${c.reset}`);
+  let manifestB: Manifest;
+  try {
+    const res = await fetch(`http://localhost:${portB}/.pact/manifest`);
+    manifestB = (await res.json()) as Manifest;
+    success("Manifest received from Server B");
+    keyValue("    server", manifestB.server);
+    keyValue("    contracts", `${manifestB.contracts.length}`);
+    for (const rc of manifestB.contracts) {
+      info(`  ${rc.name} ${c.dim}offers: ${rc.offers.join(", ")} | accepts: ${rc.accepts.join(", ")}${c.reset}`);
+    }
+  } catch (err: any) {
+    fail(`Could not reach Server B: ${err.message}`);
+    serverA.stop();
+    serverB.stop();
+    process.exit(1);
+  }
+  console.log("");
+
+  // Step 4: Also discover Server A from Server B (bilateral)
+  uiStep(4, TOTAL_STEPS, `Server B discovers Server A via ${c.cyan}GET /.pact/manifest${c.reset}`);
+  let manifestA: Manifest;
+  try {
+    const res = await fetch(`http://localhost:${portA}/.pact/manifest`);
+    manifestA = (await res.json()) as Manifest;
+    success("Manifest received from Server A");
+    keyValue("    server", manifestA.server);
+    keyValue("    contracts", `${manifestA.contracts.length}`);
+    for (const rc of manifestA.contracts) {
+      info(`  ${rc.name} ${c.dim}offers: ${rc.offers.join(", ")} | accepts: ${rc.accepts.join(", ")}${c.reset}`);
+    }
+  } catch (err: any) {
+    fail(`Could not reach Server A: ${err.message}`);
+    serverA.stop();
+    serverB.stop();
+    process.exit(1);
+  }
+  console.log("");
+
+  // Step 5: Run negotiation from A to B
+  uiStep(5, TOTAL_STEPS, `${c.bold}Negotiating${c.reset}: Server A -> Server B`);
+
+  const evidenceA = new EvidenceStore(dataDirA);
+  const negotiationEngineA = new NegotiationEngine(createDefaultProvider(), evidenceA);
+  const agreementStoreA = new AgreementStore(dataDirA);
+
+  const contractA = serverA.getRegistry().getAll()[0]!;
+  let agreementAB;
+  try {
+    agreementAB = await negotiationEngineA.negotiate(
+      contractA,
+      manifestB,
+      `http://localhost:${portB}`,
+    );
+    agreementStoreA.save(agreementAB);
+    success(`Agreement established: ${c.bold}${agreementAB.parties.local}${c.reset} <-> ${c.bold}${agreementAB.parties.remote}${c.reset}`);
+    keyValue("      id", agreementAB.id);
+    keyValue("      version", `${agreementAB.version}`);
+    keyValue("      mappings", `${agreementAB.mappings.length}`);
+    keyValue("      endpoints", Object.keys(agreementAB.compiledEndpoints).join(", ") || "(none)");
+
+    if (agreementAB.mappings.length > 0) {
+      console.log(`      ${c.bold}Field mappings:${c.reset}`);
+      for (const m of agreementAB.mappings) {
+        const dir = m.direction === "outbound" ? "->" : "<-";
+        const xform = m.transform ? ` ${c.dim}(${m.transform})${c.reset}` : "";
+        console.log(`        ${c.cyan}${m.localField}${c.reset} ${dir} ${c.green}${m.remoteField}${c.reset} ${c.dim}[${m.operation}]${c.reset}${xform}`);
+      }
+    }
+
+    if (agreementAB.trustLevels.locked.length > 0) {
+      console.log(`      ${c.bold}Trust (locked):${c.reset}`);
+      for (const rule of agreementAB.trustLevels.locked) {
+        console.log(`        ${c.red}!${c.reset} ${rule}`);
+      }
+    }
+    if (agreementAB.trustLevels.negotiable.length > 0) {
+      console.log(`      ${c.bold}Trust (negotiable):${c.reset}`);
+      for (const rule of agreementAB.trustLevels.negotiable) {
+        console.log(`        ${c.yellow}~${c.reset} ${rule}`);
+      }
+    }
+  } catch (err: any) {
+    fail(`Negotiation failed: ${err.message}`);
+    evidenceA.close();
+    serverA.stop();
+    serverB.stop();
+    process.exit(1);
+  }
+  console.log("");
+
+  // Step 6: Verify agreements via API
+  uiStep(6, TOTAL_STEPS, `Verifying agreements via ${c.cyan}GET /.pact/agreements${c.reset}`);
+  try {
+    const resAgreementsA = await fetch(`http://localhost:${portA}/.pact/agreements`);
+    const dataA = (await resAgreementsA.json()) as { agreements: any[] };
+    keyValue("    Server A agreements", `${dataA.agreements.length}`);
+
+    const resAgreementsB = await fetch(`http://localhost:${portB}/.pact/agreements`);
+    const dataB = (await resAgreementsB.json()) as { agreements: any[] };
+    keyValue("    Server B agreements", `${dataB.agreements.length}`);
+  } catch {
+    warn("Could not verify agreements via API (non-critical)");
+  }
+  console.log("");
+
+  // Step 7: Simulate renegotiation
+  uiStep(7, TOTAL_STEPS, `${c.bold}Renegotiating${c.reset}: Server B changed field names`);
+  info(`Simulating change: ${c.red}qty_available${c.reset} -> ${c.green}stock_count${c.reset}`);
+
+  try {
+    const changes = [
+      { field: "qty_available", oldValue: "qty_available", newValue: "stock_count" },
+    ];
+
+    const renegotiated = await negotiationEngineA.renegotiate(agreementAB, changes);
+    agreementStoreA.save(renegotiated);
+
+    success(`Agreement renegotiated`);
+    keyValue("      version", `${renegotiated.version}`);
+    keyValue("      renegotiated at", renegotiated.lastRenegotiated ?? "N/A");
+
+    // Show updated mappings
+    const affectedMappings = renegotiated.mappings.filter((m) => m.transform?.startsWith("renegotiated:"));
+    if (affectedMappings.length > 0) {
+      console.log(`      ${c.bold}Updated mappings:${c.reset}`);
+      for (const m of affectedMappings) {
+        console.log(`        ${c.cyan}${m.localField}${c.reset} -> ${c.green}${m.remoteField}${c.reset} ${c.dim}(${m.transform})${c.reset}`);
+      }
+    }
+
+    // Show history
+    const history = agreementStoreA.getHistory(`http://localhost:${portB}`);
+    keyValue("      history", `${history.length} previous version(s)`);
+  } catch (err: any) {
+    fail(`Renegotiation failed: ${err.message}`);
+  }
+  console.log("");
+
+  // Step 8: Summary
+  uiStep(8, TOTAL_STEPS, `${c.bold}Demo Complete${c.reset}`);
+  console.log(`  ${c.brightCyan}${c.bold}${"=".repeat(52)}${c.reset}`);
+  console.log(`  ${c.bold}  NEGOTIATION DEMO COMPLETE${c.reset}`);
+  keyValue("    Server A", `http://localhost:${portA} (store)`);
+  keyValue("    Server B", `http://localhost:${portB} (fulfillment)`);
+  keyValue("    agreement", agreementAB ? `${c.green}active${c.reset} v${agreementAB.version + 1}` : "none");
+  keyValue("    mappings", `${agreementAB?.mappings.length ?? 0}`);
+  keyValue("    renegotiations", "1");
+  console.log(`  ${c.brightCyan}${c.bold}${"=".repeat(52)}${c.reset}\n`);
+
+  // Cleanup
+  evidenceA.close();
+  serverA.stop();
+  serverB.stop();
+
+  // Clean up temp dirs
+  try {
+    rmSync(tmpBase, { recursive: true, force: true });
+  } catch {
+    // Non-critical
+  }
 }
 
 // ── Entry point ──

@@ -59,3 +59,5 @@ export { startMockServer, type MockServerHandle, type SchemaVersion } from "./ru
 export { Translator, type TranslatorOptions, type TranslatorResult, type GapQuestion, buildGenerationPrompt, buildGapDetectionPrompt, generateSuggestions, extractPactBlock, parseGapQuestions, extractContractName } from "./runtime/translator";
 export { PrimitiveRegistry, type PrimitiveResult, HttpPrimitive, ShellPrimitive, CryptoPrimitive, SqlPrimitive } from "./runtime/primitives/index";
 export { ConnectorRegistry, type LoadedConnector, type ConnectorOperation, type FieldSpec } from "./runtime/connector";
+export { NegotiationEngine, type Agreement, type FieldMapping, type Manifest, type ManifestContract, type NegotiationProposal, type NegotiationResponse } from "./runtime/negotiation";
+export { AgreementStore } from "./runtime/agreement-store";
