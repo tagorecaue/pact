@@ -1,6 +1,6 @@
 # Pact
 
-> The protocol that refuses to execute with ambiguity.
+> An AI-native protocol that turns what you want into what machines do — with proof at every step.
 
 ## What is Pact?
 
@@ -70,19 +70,20 @@ $ pact run customer.create.pact --input '{"email":"a@b.com","name":"Ana"}'
 
 ## Current Status
 
-182 tests. Zero external dependencies. TypeScript + Bun.
+238 tests. Zero external dependencies. 25 connectors. TypeScript + Bun.
 
 | What | Status |
 |------|--------|
 | Spec v0.1 (dialect, interrogation, connectors, runtime) | Complete |
 | Parser (lexer, AST, 15 section types) | Complete |
-| CLI (`pact parse`, `inspect`, `run`, `new`, `serve`, `demo-heal`) | Complete |
+| CLI (`pact parse`, `inspect`, `run`, `new`, `serve`, `connectors`, `demo-heal`) | Complete |
 | Runtime (execution engine, evidence store, data store) | Complete |
 | HTTP Gateway (`pact serve` with auto-routing from `@T`) | Complete |
 | HTTP Exchange (`<>` makes real outbound HTTP calls) | Complete |
 | LLM Integration (llama.cpp local + Claude/OpenAI API) | Complete |
 | AI Executor (`@R` reasoning — LLM generates execution code) | Complete |
 | Translator (`pact new` — natural language to .pact contracts) | Complete |
+| Connectors (25 community connectors + primitive system) | Complete |
 | Self-Healing (schema divergence detection + auto-adaptation) | Complete |
 | Server-to-Server Negotiation (`@N`) | Planned |
 
@@ -199,6 +200,72 @@ This starts a mock server, executes a contract against schema v1, switches to v2
       [low]  ADDED:   "available" (type: boolean)
 ```
 
+### Connectors
+
+Pact ships with 25 community connectors — integrations written as `.pact` contracts, not code. A connector describes how to talk to an external API: base URL, authentication, operations, inputs, outputs, and errors.
+
+```bash
+pact connectors    # list all available connectors
+```
+
+| Category | Connectors |
+|----------|-----------|
+| Messaging | Telegram, Slack, Discord, WhatsApp |
+| Payments | Stripe, Mercado Pago |
+| Email | Resend, SendGrid |
+| SMS | Twilio |
+| Dev Tools | GitHub, GitLab, Vercel, Docker |
+| AI | Anthropic (Claude), OpenAI |
+| Storage | Supabase, AWS S3, Cloudflare R2 |
+| Databases | PostgreSQL, Redis |
+| Productivity | Notion, Google Sheets, Trello |
+| Monitoring | Datadog |
+| Custom | Claude Code (shell) |
+
+Example — the Telegram connector (`connectors/community/telegram.pact`):
+
+```pact
+@S telegram
+  base_url "https://api.telegram.org/bot{token}"
+  auth
+    type bearer_token
+    env TELEGRAM_BOT_TOKEN
+
+  operations
+    send_message
+      method POST
+      path "/sendMessage"
+      intent "Send a text message to a chat"
+      input
+        chat_id str !
+        text str !
+        parse_mode str =HTML
+      output
+        ok bool
+        message_id int
+```
+
+To use a connector in your contract, reference it via `@D` and call its operations with `<>`:
+
+```pact
+@D
+  #connector.telegram >=1.0.0
+
+@X
+  <> telegram.send_message
+    send chat_id text
+    receive ok message_id
+```
+
+Credentials are never in the contract — they're resolved from environment variables at runtime:
+
+```bash
+# In your .env file or shell
+TELEGRAM_BOT_TOKEN=7123456789:AAH...
+```
+
+**Creating your own connector:** write a `.pact` file following the same structure and place it in `connectors/community/`. The connector is immediately available to all contracts and to `pact new`.
+
 ### Contract Generation
 
 `pact new` generates complete `.pact` contracts from natural language descriptions using LLM:
@@ -246,7 +313,7 @@ Or configure in `pact.config.json`:
 ### Running Tests
 
 ```bash
-bun test              # Run all 147 tests
+bun test              # Run all 238 tests
 bun test tests/lexer  # Run specific test file
 ```
 
@@ -277,11 +344,29 @@ src/
     llm.ts                  # LLM providers (local + API)
     ai-executor.ts          # AI executor for @R contracts
     translator.ts           # Contract generator (natural language -> .pact)
+    connector.ts            # Connector registry and resolver
     divergence.ts           # Schema divergence detector
     self-healer.ts          # LLM-based self-healing
+    env.ts                  # .env file loader and env: resolver
     mock-server.ts          # Mock API for demos
+    primitives/
+      index.ts              # Primitive dispatcher
+      http.ts               # HTTP primitive (fetch)
+      shell.ts              # Shell primitive (Bun.spawn)
+      crypto.ts             # Crypto primitive (hmac, hash, uuid)
+      sql.ts                # SQL primitive (SQLite)
 contracts/                  # Example .pact contracts
-tests/                      # Test suites
+  hello.pact                # Hello world demo
+  customer.create.pact      # REST API demo
+  greeting.reason.pact      # AI reasoning demo
+  product-sync.pact         # Self-healing demo
+connectors/
+  community/                # 25 community connectors
+    telegram.pact           # Telegram Bot API
+    stripe.pact             # Stripe Payments
+    github.pact             # GitHub API
+    ...                     # 22 more
+tests/                      # 238 tests across 13 files
 spec/                       # Pact spec v0.1
 ```
 
