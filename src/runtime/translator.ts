@@ -10,8 +10,8 @@ import type {
   FlowExpr,
   ExchangeExpr,
 } from "../parser/ast";
-import { existsSync, mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, writeFileSync, readdirSync } from "fs";
+import { join, basename } from "path";
 
 // ── Interfaces ──
 
@@ -248,6 +248,14 @@ pact v1
 12. Use the \`author\` field as \`translator:pact-cli\`
 13. Use the current timestamp for \`created\`
 
+## Available Connectors
+
+The following community connectors are available and can be referenced in @D (Dependencies) sections using \`#connector.<name>\`:
+
+${listAvailableConnectors()}
+
+When the description mentions integrating with any of these services, reference the appropriate connector in the @D section and use <> (exchange) in @X to call connector operations (e.g., \`<> stripe.create_charge\`).
+
 ## Your Task
 
 Generate a complete .pact contract file for the following description:
@@ -255,6 +263,38 @@ Generate a complete .pact contract file for the following description:
 "${description}"
 
 Output ONLY the .pact file content inside a \`\`\`pact code block. No explanation, no comments outside the code block.`;
+}
+
+// ── List available connectors for prompt injection ──
+
+function listAvailableConnectors(): string {
+  const connectorDirs = [
+    join(process.cwd(), "connectors", "community"),
+    join(process.cwd(), "connectors"),
+  ];
+
+  const connectorNames: string[] = [];
+  for (const dir of connectorDirs) {
+    try {
+      if (existsSync(dir)) {
+        const entries = readdirSync(dir);
+        for (const entry of entries) {
+          if (entry.endsWith(".pact")) {
+            connectorNames.push(basename(entry, ".pact"));
+          }
+        }
+        break;
+      }
+    } catch {
+      // Directory not accessible
+    }
+  }
+
+  if (connectorNames.length === 0) {
+    return "(no connectors found in connectors/community/)";
+  }
+
+  return connectorNames.map((name) => `- ${name}`).join("\n");
 }
 
 // ── Gap detection prompt ──

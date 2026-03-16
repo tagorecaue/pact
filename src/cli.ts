@@ -9,6 +9,7 @@ import { startMockServer } from "./runtime/mock-server";
 import { detectDivergence, buildSchemaMap } from "./runtime/divergence";
 import { HttpClient } from "./runtime/http-client";
 import { Translator } from "./runtime/translator";
+import { ConnectorRegistry } from "./runtime/connector";
 import type { LoadedContract } from "./runtime/registry";
 
 const USAGE = `
@@ -21,6 +22,7 @@ Usage:
   pact run <file.pact> [--input '<json>']   Execute a contract
   pact new [--desc "<description>"]         Generate contract from natural language
   pact serve <contracts-dir>                Start HTTP server
+  pact connectors                           List available connectors
   pact demo-heal [--port 4000]              Run self-healing demo
 
 Options:
@@ -59,6 +61,9 @@ async function main() {
       break;
     case "serve":
       await cmdServe(args.slice(1));
+      break;
+    case "connectors":
+      await cmdConnectors(args.slice(1));
       break;
     case "demo-heal":
       await cmdDemoHeal(args.slice(1));
@@ -250,6 +255,97 @@ function printFlowNode(node: any, indent: number): void {
       break;
     default:
       console.log(`${pad}[${node.kind}]`);
+  }
+}
+
+// ── pact connectors ──
+
+async function cmdConnectors(_args: string[]) {
+  const { join } = await import("path");
+  const { existsSync } = await import("fs");
+
+  const registry = new ConnectorRegistry();
+
+  // Try multiple connector directories
+  const connectorDirs = [
+    join(process.cwd(), "connectors", "community"),
+    join(process.cwd(), "connectors"),
+  ];
+
+  let loaded = false;
+  for (const dir of connectorDirs) {
+    if (existsSync(dir)) {
+      registry.loadDirectory(dir);
+      loaded = true;
+      break;
+    }
+  }
+
+  if (!loaded || registry.count() === 0) {
+    console.log("\n  No connectors found.");
+    console.log("  Place .pact connector files in connectors/community/\n");
+    return;
+  }
+
+  const connectors = registry.getAll();
+  const total = connectors.length;
+
+  // Group by category
+  const categories: Record<string, typeof connectors> = {};
+  for (const conn of connectors) {
+    // Derive category from the connector's authEnv or name pattern
+    let category = "Other";
+    const name = conn.name.toLowerCase();
+    if (name.includes("connector.telegram") || name.includes("connector.slack") || name.includes("connector.discord") || name.includes("connector.whatsapp")) {
+      category = "Messaging";
+    } else if (name.includes("connector.stripe") || name.includes("connector.mercadopago")) {
+      category = "Payments";
+    } else if (name.includes("connector.resend") || name.includes("connector.sendgrid")) {
+      category = "Email";
+    } else if (name.includes("connector.twilio")) {
+      category = "SMS";
+    } else if (name.includes("connector.github") || name.includes("connector.gitlab") || name.includes("connector.vercel") || name.includes("connector.docker")) {
+      category = "Dev Tools";
+    } else if (name.includes("connector.anthropic") || name.includes("connector.openai")) {
+      category = "AI";
+    } else if (name.includes("connector.supabase") || name.includes("connector.aws") || name.includes("connector.cloudflare")) {
+      category = "Storage";
+    } else if (name.includes("connector.postgresql") || name.includes("connector.redis")) {
+      category = "Databases";
+    } else if (name.includes("connector.notion") || name.includes("connector.google") || name.includes("connector.trello")) {
+      category = "Productivity";
+    } else if (name.includes("connector.datadog")) {
+      category = "Monitoring";
+    } else if (name.includes("connector.claude")) {
+      category = "Custom";
+    }
+
+    if (!categories[category]) categories[category] = [];
+    categories[category]!.push(conn);
+  }
+
+  console.log(`\nAvailable connectors (${total}):\n`);
+
+  // Sort categories in a logical order
+  const categoryOrder = ["Messaging", "Payments", "Email", "SMS", "Dev Tools", "AI", "Storage", "Databases", "Productivity", "Monitoring", "Custom", "Other"];
+
+  for (const cat of categoryOrder) {
+    const conns = categories[cat];
+    if (!conns || conns.length === 0) continue;
+
+    console.log(`  ${cat}:`);
+    for (const conn of conns) {
+      // Derive short name
+      let shortName = conn.name;
+      if (shortName.startsWith("connector.")) shortName = shortName.slice(10);
+      if (shortName.endsWith("-connector")) shortName = shortName.slice(0, -10);
+
+      const opCount = conn.operations.size;
+      const envVar = conn.authEnv || "N/A";
+      const pad = " ".repeat(Math.max(1, 16 - shortName.length));
+      console.log(`    ${shortName}${pad}${opCount} operation${opCount !== 1 ? "s" : ""}  (env: ${envVar})`);
+    }
+    console.log("");
   }
 }
 

@@ -4,6 +4,8 @@ import { HttpClient, type HttpResponse } from "./http-client";
 import type { LlmProvider } from "./llm";
 import { detectDivergence, buildSchemaMap, type DivergenceReport } from "./divergence";
 import { SelfHealer, applyFieldMapping } from "./self-healer";
+import { PrimitiveRegistry } from "./primitives/index";
+import { ConnectorRegistry, type LoadedConnector as LoadedConnectorDef, type ConnectorOperation } from "./connector";
 import type {
   FlowExpr,
   StepNode,
@@ -47,6 +49,8 @@ export class ExecutionEngine {
   private httpClient: HttpClient;
   private llm: LlmProvider | null;
   private selfHealer: SelfHealer | null;
+  private primitives: PrimitiveRegistry;
+  private connectorRegistry: ConnectorRegistry;
   // Store last known schema per exchange target for divergence detection
   private schemaCache: Map<string, Record<string, string>> = new Map();
   // Store last successful response per exchange target
@@ -55,13 +59,15 @@ export class ExecutionEngine {
   public lastDivergence: DivergenceReport | null = null;
   public lastHealResult: import("./self-healer").HealResult | null = null;
 
-  constructor(evidence: EvidenceStore, httpClient?: HttpClient, llm?: LlmProvider) {
+  constructor(evidence: EvidenceStore, httpClient?: HttpClient, llm?: LlmProvider, connectorRegistry?: ConnectorRegistry) {
     this.evidence = evidence;
     this.httpClient = httpClient ?? new HttpClient();
     this.llm = llm ?? null;
     this.selfHealer = this.llm
       ? new SelfHealer({ llm: this.llm, evidence: this.evidence })
       : null;
+    this.primitives = new PrimitiveRegistry({ httpClient: this.httpClient });
+    this.connectorRegistry = connectorRegistry ?? new ConnectorRegistry();
   }
 
   async execute(
@@ -170,6 +176,57 @@ export class ExecutionEngine {
     const startTime = performance.now();
     const stepName = node.name;
 
+    // Handle shell/exec steps asynchronously via PrimitiveRegistry
+    if (stepName === "shell" || stepName === "exec") {
+      try {
+        const command = node.args[0] ?? "";
+        const result = await this.primitives.execute("shell", "run", {
+          command,
+          timeout: 30_000,
+        });
+        const durationMs = Math.round(performance.now() - startTime);
+
+        if (result.success) {
+          ctx.set("_shell_stdout", result.output.stdout);
+          ctx.set("_shell_stderr", result.output.stderr);
+          ctx.set("_shell_exit_code", result.output.exitCode);
+          steps.push({ name: stepName, status: "success", output: result.output, durationMs });
+        } else {
+          steps.push({ name: stepName, status: "failed", durationMs, error: result.error });
+          throw new PactRuntimeError(result.error ?? "Shell command failed");
+        }
+
+        this.evidence.record({
+          contract_id: contractId,
+          request_id: requestId,
+          step_name: stepName,
+          action: stepName,
+          input: JSON.stringify({ command }),
+          output: JSON.stringify(result.output),
+          duration_ms: durationMs,
+          timestamp: new Date().toISOString(),
+          status: result.success ? "success" : "failed",
+        });
+        return;
+      } catch (err) {
+        const durationMs = Math.round(performance.now() - startTime);
+        const message = err instanceof Error ? err.message : String(err);
+        steps.push({ name: stepName, status: "failed", durationMs, error: message });
+        this.evidence.record({
+          contract_id: contractId,
+          request_id: requestId,
+          step_name: stepName,
+          action: stepName,
+          input: JSON.stringify(node.args),
+          output: JSON.stringify({ error: message }),
+          duration_ms: durationMs,
+          timestamp: new Date().toISOString(),
+          status: "failed",
+        });
+        throw err;
+      }
+    }
+
     try {
       const output = this.runBuiltinStep(stepName, node.args, ctx);
       const durationMs = Math.round(performance.now() - startTime);
@@ -251,6 +308,12 @@ export class ExecutionEngine {
         const id = crypto.randomUUID();
         ctx.set("generated_id", id);
         return { id };
+
+      case "shell":
+      case "exec":
+        // Shell execution — delegate to executeShell (async, but called sync here)
+        // Store a marker; the async execution happens via executeStep override
+        return { step: name, deferred: true, args };
 
       default:
         // Unknown step — treat as a generic action that succeeds
@@ -394,10 +457,33 @@ export class ExecutionEngine {
       payload[field] = ctx.get(field) ?? field;
     }
 
+    // Try to resolve via ConnectorRegistry first
+    const connectorResolution = this.connectorRegistry.resolve(node.target);
+
     // Resolve target URL
     const baseUrl = ctx.get("_base_url") as string | undefined;
     let targetUrl: string | null = null;
-    if (node.target.startsWith("http://") || node.target.startsWith("https://")) {
+    let method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH" = "POST";
+    let headers: Record<string, string> = {};
+
+    if (connectorResolution) {
+      // Connector found — build URL from connector baseUrl + operation path
+      const { connector, operation } = connectorResolution;
+      targetUrl = connector.baseUrl + operation.path;
+      method = (operation.method as typeof method) ?? "POST";
+
+      // Add auth headers based on connector auth type
+      const authEnvValue = process.env[connector.authEnv] ?? "";
+      if (authEnvValue) {
+        if (connector.authType === "bearer_token") {
+          headers["Authorization"] = `Bearer ${authEnvValue}`;
+        } else if (connector.authType === "api_key") {
+          headers["X-API-Key"] = authEnvValue;
+        } else if (connector.authType === "basic") {
+          headers["Authorization"] = `Basic ${authEnvValue}`;
+        }
+      }
+    } else if (node.target.startsWith("http://") || node.target.startsWith("https://")) {
       targetUrl = node.target;
     } else if (node.target.includes("/")) {
       // Target has path segments (e.g., httpbin.org/get) — treat as full host+path
@@ -415,9 +501,10 @@ export class ExecutionEngine {
       // Real HTTP exchange
       try {
         const response = await this.httpClient.request({
-          method: "POST",
+          method,
           url: targetUrl,
-          body: payload,
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+          body: method !== "GET" ? payload : undefined,
           timeout: 30_000,
         });
 

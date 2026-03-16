@@ -57,3 +57,5 @@ export { detectDivergence, buildSchemaMap, type SchemaDivergence, type Divergenc
 export { SelfHealer, applyFieldMapping, type SelfHealerOptions, type HealResult } from "./runtime/self-healer";
 export { startMockServer, type MockServerHandle, type SchemaVersion } from "./runtime/mock-server";
 export { Translator, type TranslatorOptions, type TranslatorResult, type GapQuestion, buildGenerationPrompt, buildGapDetectionPrompt, generateSuggestions, extractPactBlock, parseGapQuestions, extractContractName } from "./runtime/translator";
+export { PrimitiveRegistry, type PrimitiveResult, HttpPrimitive, ShellPrimitive, CryptoPrimitive, SqlPrimitive } from "./runtime/primitives/index";
+export { ConnectorRegistry, type LoadedConnector, type ConnectorOperation, type FieldSpec } from "./runtime/connector";
