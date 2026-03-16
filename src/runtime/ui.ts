@@ -25,15 +25,25 @@ export const c = {
 };
 
 /**
- * Compact ASCII banner for the Pact CLI.
- * Uses cyan + magenta, kept under 45 chars wide, 5 lines tall.
+ * Bold ASCII banner for the Pact CLI.
  */
 export function printBanner(): void {
-  console.log(`
-${c.brightCyan}${c.bold}  ┌─────────────────────────────────────┐${c.reset}
-${c.brightCyan}${c.bold}  │${c.reset}  ${c.brightCyan}${c.bold}p a c t${c.reset}  ${c.dim}${c.gray}intent compiler protocol${c.reset}  ${c.brightCyan}${c.bold}│${c.reset}
-${c.brightCyan}${c.bold}  └─────────────────────────────────────┘${c.reset}
-`);
+  const p = c.brightCyan;
+  const a = c.brightMagenta;
+  const r = c.reset;
+  const d = c.dim;
+  const g = c.gray;
+
+  console.log("");
+  console.log(`   ${p}██████╗  ${a}█████╗  ${p}██████╗${a}████████╗${r}`);
+  console.log(`   ${p}██╔══██╗${a}██╔══██╗${p}██╔════╝${a}╚══██╔══╝${r}`);
+  console.log(`   ${p}██████╔╝${a}███████║${p}██║     ${a}   ██║${r}`);
+  console.log(`   ${p}██╔═══╝ ${a}██╔══██║${p}██║     ${a}   ██║${r}`);
+  console.log(`   ${p}██║     ${a}██║  ██║${p}╚██████╗${a}   ██║${r}`);
+  console.log(`   ${p}╚═╝     ${a}╚═╝  ╚═╝${p} ╚═════╝${a}   ╚═╝${r}`);
+  console.log("");
+  console.log(`   ${d}${g}intent in, execution out — with proof.${r}`);
+  console.log("");
 }
 
 export function success(msg: string): void {
